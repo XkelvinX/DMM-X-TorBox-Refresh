@@ -1,5 +1,7 @@
 DMMTorBox-Refresh-2.3.3-stable.txt
 DMMTorBox-Refresh-2.4.0.user.js
+DMMTorBox-Refresh-2.4.1-backup.user.js
+CHANGELOG-RESTORE.md
 node_modules/
 package.json
 package-lock.json

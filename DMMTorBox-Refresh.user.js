@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         TorBox WebDAV Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      2.4.1
+// @version      2.5.0
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
-// @description  Acompanha torrents e NZBs no TorBox e solicita refresh do WebDAV quando os arquivos ficam disponíveis.
+// @description  Envia NZBs limpos do DMM direto ao TorBox, acompanha torrents e Usenet e atualiza o WebDAV quando ficam disponíveis.
 // @match        https://torbox.app/*
 // @match        https://www.torbox.app/*
 // @match        https://debridmediamanager.com/*
@@ -24,9 +24,11 @@
 // ==/UserScript==
 
 /*
- * Fluxo: NZB enviado em torbox.app; torrent adicionado pelo DMM.
- * Não intercepta fetch/XHR: GM com privilégios roda isolado no wBlock atual.
- * Não modifica downloads, não envia NZBs e não depende do proxy do DMM.
+ * Fluxo: NZB enviado pelo DMM (interceptação direta) ou em torbox.app; torrent pelo DMM.
+ * Não sobrescreve fetch/XHR da página: GM com privilégios roda isolado no wBlock atual.
+ * No DMM, intercepta o clique em <a href="blob:..." download="*.nzb"> gerado pelo botão NZB,
+ * lê o XML limpo sincronicamente antes do revokeObjectURL e envia direto ao TorBox; se
+ * falhar ou não houver API key, faz o download normal do .nzb no iOS como fallback.
  * Faz consultas enquanto a aba está visível; retoma ao voltar ao Safari.
  * Ao ocultar, conclui somente o ciclo já iniciado e o refresh dos itens prontos.
  * Sem novos ciclos/retries ocultos; tolerância de conclusão limitada a 60 s.
@@ -35,6 +37,9 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 2.5.0:
+ *   - Interceptação direta de arquivos .nzb limpos no DMM (aba Usenet e /anonymize-nzb)
+ *     com envio imediato para POST /v1/api/usenet/createusenetdownload e fallback local.
  * 2.4.0:
  *   - Refresh manual marca como sincronizados os itens prontos da última listagem.
  *   - cached_at fora da identidade (um único refresh extra após atualizar).
@@ -42,7 +47,7 @@
  *   - Estados centralizados, ciclo dividido em funções e painel no padrão visual do DMM 4.0.1.
  *   - Detecta explicitamente o código PLAN_RESTRICTED_FEATURE (plano gratuito do TorBox).
  *
- * DMM revalidado em 24/10/2026: v4.0.1 (Tailwind v4 + palette v3.4.17, ImbdPickerModal/FloatingLibraryIndicator).
+ * DMM revalidado em 25/10/2026: v4.0.1 (commit eb67f35b, UsenetResults/nzbDownload/nzbSanitize).
  * Endpoints preservados; círculo independente no celular e acima do nativo visível.
  * HTTP 429 da API pausa torrents e Usenet entre abas do userscript.
  * Contador: arquivos conhecidos; + indica arquivos ainda não enumerados.
@@ -57,9 +62,10 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.4.1';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.5.0';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
+  const USENET_CREATE = `${API}/usenet/createusenetdownload`;
   const KEY = 'torbox_api_key'; // Mantém a chave se editar o userscript antigo.
   const STATE = 'tb_webdav_v2_state';
   const PAUSE = 'tb_webdav_v2_paused';
@@ -83,10 +89,10 @@
   // ---------------------------------------------------------------- Estados
   const S = Object.freeze({
     CONFIG: 'Configurar', PAUSED: 'Pausado', CHECKING: 'Verificando',
-    UPDATING: 'Atualizando', WAITING: 'Aguardando', OTHER_TAB: 'Outra aba',
-    AUTH: 'Verificar acesso', RETRY: 'Tentando novamente', PARTIAL: 'Consulta parcial',
-    API_DOWN: 'API indisponível', ATTENTION: 'Atenção', PENDING: 'Pendente',
-    OK: 'OK', MONITORING: 'Monitorando'
+    UPDATING: 'Atualizando', SENDING_NZB: 'Enviando NZB', WAITING: 'Aguardando',
+    OTHER_TAB: 'Outra aba', AUTH: 'Verificar acesso', RETRY: 'Tentando novamente',
+    PARTIAL: 'Consulta parcial', API_DOWN: 'API indisponível', ATTENTION: 'Atenção',
+    PENDING: 'Pendente', OK: 'OK', MONITORING: 'Monitorando'
   });
   // icon: símbolo fixo; problem: cor de alerta; clock/busy: estados transitórios;
   // keepSuccess: não cancela o "OK" temporário. Estados desconhecidos (relatórios
@@ -102,6 +108,7 @@
     [S.WAITING]: { clock: true },
     [S.OTHER_TAB]: { clock: true },
     [S.UPDATING]: { busy: true },
+    [S.SENDING_NZB]: { busy: true },
     [S.CHECKING]: { busy: true, keepSuccess: true },
     [S.PENDING]: { keepSuccess: true },
     [S.OK]: { keepSuccess: true },
@@ -506,7 +513,8 @@
     if (panelDiag?.hidden) toggleDiagnostics();
   }
   function recordResponse(url, res) {
-    const operation = url === DAV ? 'WebDAV' : url.includes('/usenet/') ? 'Usenet' : 'Torrents';
+    const operation = url === DAV ? 'WebDAV' : url === USENET_CREATE ? 'NZB->TorBox'
+      : url.includes('/usenet/') ? 'Usenet' : 'Torrents';
     const text = String(res.responseText || '').trim();
     const format = /^[{[]/.test(text) ? 'JSON' : /<html\b/i.test(text) ? 'HTML' : 'outro';
     // finalUrl indica se o gerenciador expõe o destino após redirecionamentos.
@@ -644,7 +652,7 @@
     const ms = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
     return Number.isFinite(ms) ? Math.max(1000, ms) : fallback;
   }
-  function request(url, authorization) {
+  function request(url, authorization, options = {}) {
     // URLs fixas: nenhuma chave é enviada ao DMM ou colocada na query string.
     return new Promise((resolve, reject) => {
       let handle;
@@ -660,11 +668,12 @@
       };
       try {
         handle = GM_xmlhttpRequest({
-          method: 'GET', url, timeout: 30000, anonymous: true,
+          method: options.method || 'GET', url, timeout: 30000, anonymous: true,
           // "redirect" é extensão do Tampermonkey; gerenciadores que a ignoram
           // seguem o redirecionamento. Nesse caso valem finalUrl e validWebDAV.
           redirect: url === DAV ? 'follow' : 'error',
-          headers: { Authorization: authorization, 'Cache-Control': 'no-cache' },
+          headers: { Authorization: authorization, 'Cache-Control': 'no-cache', ...options.headers },
+          ...(options.data !== undefined ? { data: options.data } : {}),
           onload: finish(res => { recordResponse(url, res); resolve(res); }),
           onerror: finish(() => reject(error('Falha de conexão.'))),
           ontimeout: finish(() => reject(error('Tempo limite de conexão.'))),
@@ -675,6 +684,149 @@
         reject(error('O wBlock não conseguiu iniciar a requisição.'));
       }
     });
+  }
+
+  // ------------------------------------------------ Interceptação NZB no DMM
+  function triggerLocalNzbFallback(xml, filename) {
+    // Dispara o download nativo do arquivo .nzb para o app Arquivos do iOS caso
+    // o envio direto para a API do TorBox falhe ou não haja API key configurada.
+    const blob = new Blob([xml], { type: 'application/x-nzb' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.dataset.tbwdFallback = '1';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+  function readBlobXmlSync(blobUrl) {
+    // No DMM (saveBlob em nzbDownload.ts), URL.revokeObjectURL(url) roda logo na
+    // linha seguinte ao anchor.click(). XHR síncrono em blob: de mesma origem lê
+    // o XML da memória instantaneamente antes do click() retornar ao código da página.
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', blobUrl, false);
+    xhr.send();
+    if (xhr.status !== 200 && xhr.status !== 0) throw error('Não foi possível ler o NZB local.');
+    const xml = String(xhr.responseText || '');
+    if (!xml.includes('<nzb') || !xml.includes('<file')) throw error('Conteúdo NZB inválido.');
+    return xml;
+  }
+  function decodeXmlText(raw) {
+    return String(raw || '').replace(
+      /&(?:#(\d+)|#x([0-9a-fA-F]+)|(quot|apos|lt|gt|amp));/g,
+      (full, dec, hex, named) => {
+        if (dec !== undefined) return String.fromCodePoint(Number(dec));
+        if (hex !== undefined) return String.fromCodePoint( parseInt(hex, 16));
+        return { quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' }[named] ?? full;
+      }
+    );
+  }
+  function extractNzbMeta(xml, type) {
+    const re = new RegExp(`<meta\\b[^>]*\\btype\\s*=\\s*["']${type}["'][^>]*>([\\s\\S]*?)<\\/meta>`, 'i');
+    const match = re.exec(xml);
+    return match ? decodeXmlText(match[1]).trim() : '';
+  }
+  function buildNzbMultipart(xml, filename) {
+    // String multipart/form-data pura: atravessa a ponte JSON (browser.runtime.sendMessage)
+    // do wBlock no iOS sem depender de serialização nativa de FormData ou Blob.
+    let boundary = `----TorBoxWebDAVNzb${crypto.randomUUID().replace(/-/g, '')}`;
+    while (xml.includes(boundary)) boundary += crypto.randomUUID().slice(0, 8);
+    const safeFile = filename.replace(/[\r\n"\\]/g, '_');
+    const cleanName = safeFile.replace(/\.nzb$/i, '').trim();
+    const password = extractNzbMeta(xml, 'password').replace(/\r?\n/g, ' ');
+    const parts = [
+      `--${boundary}`,
+      `Content-Disposition: form-data; name="file"; filename="${safeFile}"`,
+      'Content-Type: application/x-nzb',
+      '',
+      xml
+    ];
+    if (cleanName) {
+      parts.push(
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="name"',
+        '',
+        cleanName
+      );
+    }
+    if (password) {
+      parts.push(
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="password"',
+        '',
+        password
+      );
+    }
+    parts.push(`--${boundary}--`, '');
+    return { boundary, body: parts.join('\r\n'), cleanName: cleanName || safeFile };
+  }
+  async function uploadNzbToTorBox(xml, filename) {
+    const key = keyNow();
+    if (!key) {
+      show(S.CONFIG, 'Configure a API key do TorBox para enviar NZBs direto. Baixando arquivo no iOS...');
+      triggerLocalNzbFallback(xml, filename);
+      return;
+    }
+    const rev = revision;
+    const { boundary, body, cleanName } = buildNzbMultipart(xml, filename);
+    show(S.SENDING_NZB, `Enviando NZB limpo ao TorBox: ${cleanName}`);
+    try {
+      const res = await request(USENET_CREATE, `Bearer ${key}`, {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        data: body
+      });
+      try { checkHttp(res, 'TorBox Usenet'); }
+      catch (e) {
+        if (e.rateLimited) {
+          await pollingName(key, rev);
+          rememberApiPause(key, rev, e.wait);
+        }
+        throw e;
+      }
+      let payload;
+      try { payload = JSON.parse(res.responseText); } catch { throw error('TorBox Usenet: resposta inválida.'); }
+      if (payload?.success !== true) {
+        const authKind = explicitAuthError(res);
+        const detailMsg = String(payload?.detail || payload?.error || 'envio recusado pelo TorBox');
+        throw error(`TorBox Usenet: ${detailMsg}`, authKind === 'AUTH' || authKind === 'PLAN_RESTRICTED_FEATURE');
+      }
+      activeCount = Math.max(1, activeCount);
+      show(S.OK, `NZB enviado ao TorBox: ${cleanName}. Acompanhando até ficar disponível no WebDAV.`);
+      schedule(0);
+    } catch (e) {
+      if (e.auth) {
+        blockedAuth = true;
+        show(S.AUTH, `${e.message} Baixando NZB no iOS como fallback.`);
+      } else {
+        show(S.ATTENTION, `${e.message} Baixando NZB no iOS como fallback.`);
+      }
+      triggerLocalNzbFallback(xml, filename);
+    }
+  }
+  function interceptDmmNzbClick(event) {
+    const anchorEl = event.target?.closest?.('a[download][href^="blob:"]');
+    if (!anchorEl || anchorEl.dataset.tbwdFallback === '1') return;
+    const filename = String(anchorEl.getAttribute('download') || '').trim();
+    if (!/\.nzb$/i.test(filename)) return;
+    // Se não há chave configurada, deixa o download nativo do iOS seguir direto
+    // sem recriar o Blob, apenas avisando no painel.
+    if (!keyNow()) {
+      show(S.CONFIG, 'Configure a API key do TorBox para enviar NZBs direto. Download local mantido.');
+      return;
+    }
+    let xml;
+    try {
+      xml = readBlobXmlSync(anchorEl.href);
+    } catch {
+      // Se o navegador não permitir ler o Blob sincronicamente, mantém o download nativo.
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void uploadNzbToTorBox(xml, filename);
   }
   function explicitAuthError(res) {
     // Só códigos estruturados: texto de páginas de bloqueio não prova chave inválida.
@@ -1194,6 +1346,9 @@
       GM_addValueChangeListener(name, (_name, _old, _new, remote) => { if (remote) changedSettings(); });
     // O wBlock mantém o snapshot GM sincronizado entre as abas do userscript.
     GM_addValueChangeListener(STATE, (_name, _old, _new, remote) => { if (remote) schedule(); });
+  }
+  if (IS_DMM) {
+    document.addEventListener('click', interceptDmmNzbClick, true);
   }
   document.addEventListener('visibilitychange', () => {
     if (visible()) { renderControl(); schedule(0); }
