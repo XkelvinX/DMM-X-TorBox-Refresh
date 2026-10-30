@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorBox WebDAV Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      2.5.0
+// @version      2.5.1
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -37,6 +37,10 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 2.5.1:
+ *   - Proteção contra concorrência entre ciclo de polling e envio de NZB (nzbInFlight
+ *     + janela de aceleração pós-envio), checagem de revisão após upload e validação
+ *     de codepoints XML.
  * 2.5.0:
  *   - Interceptação direta de arquivos .nzb limpos no DMM (aba Usenet e /anonymize-nzb)
  *     com envio imediato para POST /v1/api/usenet/createusenetdownload e fallback local.
@@ -62,7 +66,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.5.0';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.5.1';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
   const USENET_CREATE = `${API}/usenet/createusenetdownload`;
@@ -153,6 +157,8 @@
   let pendingDownloads = 0;
   let unknownCount = 0;
   let activeCount = 0;
+  let nzbInFlight = 0;
+  let nzbBoostUntil = 0;
   // Última listagem válida desta aba: usada pelo refresh manual.
   let lastReady = {};
   let lastCounts = {};
@@ -435,12 +441,12 @@
     return { version: 2, ready: s.ready, lastRefresh };
   }
   function pollDelay() {
-    return activeCount > 0 || Date.now() < successUntil ? ACTIVE_POLL : POLL;
+    return activeCount > 0 || Date.now() < successUntil || Date.now() < nzbBoostUntil ? ACTIVE_POLL : POLL;
   }
   function schedule(delay = pollDelay()) {
     clearTimeout(timer);
     if (!visible() || paused() || blockedAuth || !keyNow()) return;
-    if (running) { if (delay === 0) wakePending = true; return; }
+    if (running || nzbInFlight > 0) { if (delay === 0) wakePending = true; return; }
     timer = setTimeout(() => void cycle(), Math.max(delay, retryAt - Date.now(), manualPending ? 0 : apiPauseRemaining(), 0));
   }
   function changedSettings() {
@@ -452,6 +458,7 @@
     manualPending = false;
     pendingCount = 0;
     pendingDownloads = 0; unknownCount = 0; activeCount = 0;
+    nzbBoostUntil = 0;
     successUntil = 0;
     lastReady = {}; lastCounts = {};
     clearTimeout(successTimer);
@@ -717,8 +724,11 @@
     return String(raw || '').replace(
       /&(?:#(\d+)|#x([0-9a-fA-F]+)|(quot|apos|lt|gt|amp));/g,
       (full, dec, hex, named) => {
-        if (dec !== undefined) return String.fromCodePoint(Number(dec));
-        if (hex !== undefined) return String.fromCodePoint( parseInt(hex, 16));
+        if (dec !== undefined || hex !== undefined) {
+          const code = dec !== undefined ? Number(dec) : parseInt(hex, 16);
+          return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
+            ? String.fromCodePoint(code) : full;
+        }
         return { quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' }[named] ?? full;
       }
     );
@@ -771,6 +781,7 @@
     }
     const rev = revision;
     const { boundary, body, cleanName } = buildNzbMultipart(xml, filename);
+    nzbInFlight++;
     show(S.SENDING_NZB, `Enviando NZB limpo ao TorBox: ${cleanName}`);
     try {
       const res = await request(USENET_CREATE, `Bearer ${key}`, {
@@ -778,6 +789,7 @@
         headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
         data: body
       });
+      checkCurrent(key, rev);
       try { checkHttp(res, 'TorBox Usenet'); }
       catch (e) {
         if (e.rateLimited) {
@@ -793,17 +805,24 @@
         const detailMsg = String(payload?.detail || payload?.error || 'envio recusado pelo TorBox');
         throw error(`TorBox Usenet: ${detailMsg}`, authKind === 'AUTH' || authKind === 'PLAN_RESTRICTED_FEATURE');
       }
+      nzbBoostUntil = Date.now() + ACTIVE_WINDOW;
       activeCount = Math.max(1, activeCount);
       show(S.OK, `NZB enviado ao TorBox: ${cleanName}. Acompanhando até ficar disponível no WebDAV.`);
-      schedule(0);
     } catch (e) {
-      if (e.auth) {
-        blockedAuth = true;
-        show(S.AUTH, `${e.message} Baixando NZB no iOS como fallback.`);
-      } else {
-        show(S.ATTENTION, `${e.message} Baixando NZB no iOS como fallback.`);
+      if (key === keyNow() && rev === revision) {
+        if (e.auth) {
+          blockedAuth = true;
+          show(S.AUTH, `${e.message} Baixando NZB no iOS como fallback.`);
+        } else {
+          show(S.ATTENTION, `${e.message} Baixando NZB no iOS como fallback.`);
+        }
       }
       triggerLocalNzbFallback(xml, filename);
+    } finally {
+      nzbInFlight = Math.max(0, nzbInFlight - 1);
+      if (nzbInFlight === 0 && key === keyNow() && rev === revision) {
+        schedule(wakePending || Date.now() < nzbBoostUntil ? 0 : pollDelay());
+      }
     }
   }
   function interceptDmmNzbClick(event) {
@@ -1253,6 +1272,7 @@
       ? ` Consulta temporariamente indisponível: ${[...ctx.unavailable].join(', ')}. Novas tentativas serão automáticas.` : '';
     // Só declara sucesso total depois que ambas as consultas terminam.
     const inFlight = ctx.completed.size < KINDS.length;
+    if (nzbInFlight > 0 && !ctx.updated) return;
     const label = !Object.keys(ctx.current).length && !inFlight ? S.API_DOWN
       : partial ? S.PARTIAL : inFlight ? S.CHECKING
       : pendingDownloads ? S.PENDING : ctx.updated ? S.OK : S.MONITORING;
@@ -1295,7 +1315,7 @@
     return delay;
   }
   async function cycle() {
-    if (running) return;
+    if (running || nzbInFlight > 0) return;
     const key = keyNow();
     if (!key || paused() || blockedAuth || !visible()) return;
     if (Date.now() < retryAt) { schedule(0); return; }
