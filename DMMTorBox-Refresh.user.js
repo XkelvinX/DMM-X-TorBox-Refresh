@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TorBox WebDAV Auto Refresh
+// @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      2.5.1
+// @version      2.6.0
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -26,9 +26,11 @@
 /*
  * Fluxo: NZB enviado pelo DMM (interceptação direta) ou em torbox.app; torrent pelo DMM.
  * Não sobrescreve fetch/XHR da página: GM com privilégios roda isolado no wBlock atual.
- * No DMM, intercepta o clique em <a href="blob:..." download="*.nzb"> gerado pelo botão NZB,
- * lê o XML limpo sincronicamente antes do revokeObjectURL e envia direto ao TorBox; se
- * falhar ou não houver API key, faz o download normal do .nzb no iOS como fallback.
+ * No DMM, sincroniza automaticamente a API key do TorBox (localStorage['tb:apiKey']) se ainda
+ * não configurada, intercepta o clique em <a href="blob:..." download="*.nzb"> gerado pelo
+ * botão NZB, lê o XML limpo sincronicamente antes do revokeObjectURL e envia direto ao TorBox
+ * com feedback visual no próprio botão NZB da linha; se falhar ou não houver API key, faz o
+ * download normal do .nzb no iOS como fallback.
  * Faz consultas enquanto a aba está visível; retoma ao voltar ao Safari.
  * Ao ocultar, conclui somente o ciclo já iniciado e o refresh dos itens prontos.
  * Sem novos ciclos/retries ocultos; tolerância de conclusão limitada a 60 s.
@@ -37,6 +39,10 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 2.6.0:
+ *   - Renomeado para DMM X TorBox Auto Refresh.
+ *   - Sincronização automática da API key do TorBox já salva no DMM (localStorage['tb:apiKey']).
+ *   - Feedback visual direto no botão NZB da linha no DMM (enviando, ✓ TorBox ou alerta).
  * 2.5.1:
  *   - Proteção contra concorrência entre ciclo de polling e envio de NZB (nzbInFlight
  *     + janela de aceleração pós-envio), checagem de revisão após upload e validação
@@ -66,11 +72,13 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.5.1';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.6.0';
+  const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
   const USENET_CREATE = `${API}/usenet/createusenetdownload`;
   const KEY = 'torbox_api_key'; // Mantém a chave se editar o userscript antigo.
+  const DMM_KEY = 'tb:apiKey';
   const STATE = 'tb_webdav_v2_state';
   const PAUSE = 'tb_webdav_v2_paused';
   // Repositório público: nenhuma chave no código. A chave salva pelas versões
@@ -89,6 +97,7 @@
   const STATE_LIMIT = 900000;
   const IS_DMM = /^(www\.)?debridmediamanager\.com$/.test(window.location.hostname);
   const ANCHOR_SELECTOR = 'button[aria-label="Refresh library"]';
+  const NZB_BTN_PREFIX = 'Download clean NZB for ';
 
   // ---------------------------------------------------------------- Estados
   const S = Object.freeze({
@@ -159,6 +168,8 @@
   let activeCount = 0;
   let nzbInFlight = 0;
   let nzbBoostUntil = 0;
+  const nzbButtonByFile = new Map();
+  let lastNzbButton = null;
   // Última listagem válida desta aba: usada pelo refresh manual.
   let lastReady = {};
   let lastCounts = {};
@@ -287,7 +298,7 @@
     }
     button.dataset.state = mode;
     button.dataset.digits = text.length > 3 ? 'many' : 'normal';
-    button.setAttribute('aria-label', `TorBox WebDAV: ${detail} Abrir controles.`);
+    button.setAttribute('aria-label', `${SCRIPT_TITLE}: ${detail} Abrir controles.`);
     // Sem title: evita também o balão nativo de tooltip.
     renderPanel();
   }
@@ -331,12 +342,12 @@
     panel.id = 'tbwd-panel';
     panel.hidden = true;
     panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-label', 'Controles do TorBox WebDAV');
+    panel.setAttribute('aria-label', `Controles do ${SCRIPT_TITLE}`);
     const header = document.createElement('div');
     header.className = 'tbwd-header';
     const title = document.createElement('h2');
     title.className = 'tbwd-title';
-    title.textContent = `TorBox WebDAV ${SCRIPT_VERSION}`;
+    title.textContent = `${SCRIPT_TITLE} ${SCRIPT_VERSION}`;
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.className = 'tbwd-close';
@@ -473,7 +484,32 @@
         : keyNow() ? 'Consultando as listas do TorBox.' : 'Toque para configurar a API key do TorBox.');
     schedule(0);
   }
+  function readDmmTorBoxKey() {
+    if (!IS_DMM) return '';
+    try {
+      const raw = window.localStorage?.getItem(DMM_KEY);
+      if (!raw) return '';
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+      if (parsed && typeof parsed === 'object' && 'value' in parsed) {
+        if (Number.isFinite(parsed.expiry) && parsed.expiry < Date.now()) return '';
+        parsed = parsed.value;
+      }
+      const candidate = typeof parsed === 'string' ? parsed.trim() : '';
+      return /^[\x21-\x7e]+$/.test(candidate) ? candidate : '';
+    } catch { return ''; }
+  }
+  function syncDmmApiKey(notifyChange = true) {
+    if (keyNow()) return false;
+    const dmmKey = readDmmTorBoxKey();
+    if (!dmmKey) return false;
+    GM_deleteValue(STATE);
+    GM_setValue(KEY, dmmKey);
+    if (notifyChange) changedSettings();
+    return true;
+  }
   function configure() {
+    if (syncDmmApiKey(true)) return;
     const value = prompt('Cole sua API key do TorBox. Ela será salva pelo wBlock para este userscript. Não use a senha da sua conta.');
     if (value === null) return;
     const key = value.trim();
@@ -498,7 +534,7 @@
     changedSettings();
   }
   function requestManual() {
-    if (!keyNow()) { configure(); return; }
+    if (!keyNow() && !syncDmmApiKey(true)) { configure(); return; }
     if (paused()) { notify('Retome o acompanhamento antes de atualizar.'); return; }
     if (blockedAuth) { configure(); return; }
     manualPending = true;
@@ -507,7 +543,7 @@
   }
   function diagnosticsText() {
     return [
-      `TorBox WebDAV ${SCRIPT_VERSION}`,
+      `${SCRIPT_TITLE} ${SCRIPT_VERSION}`,
       `Estado: ${status}`,
       `Aba: ${visible() ? 'visível' : 'oculta'}; pausa: ${paused() ? 'sim' : 'não'}`,
       `Chave armazenada: ${keyNow() ? 'sim' : 'não'}`,
@@ -631,6 +667,18 @@
         font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
         user-select:text; -webkit-user-select:text;
       }
+      button[data-tbwd-nzb="sending"] {
+        border-color:rgb(6 182 212 / .6) !important; background:rgb(22 78 99 / .45) !important; color:#67e8f9 !important;
+      }
+      button[data-tbwd-nzb="sent"] {
+        border-color:rgb(34 197 94 / .6) !important; background:rgb(20 83 45 / .45) !important; color:#86efac !important;
+      }
+      button[data-tbwd-nzb="error"] {
+        border-color:rgb(234 179 8 / .6) !important; background:rgb(113 63 18 / .45) !important; color:#fde047 !important;
+      }
+      button[data-tbwd-nzb] .tbwd-nzb-badge {
+        margin-left:3px; font-weight:700;
+      }
     `;
     (document.head || document.documentElement).appendChild(style);
     button.id = 'tbwd-control';
@@ -694,6 +742,48 @@
   }
 
   // ------------------------------------------------ Interceptação NZB no DMM
+  function safeDmmNzbName(title) {
+    // Espelha safeNzbName() em src/utils/nzbName.ts do DMM 4.0.1 para associar
+    // o botão NZB clicado na tabela Usenet ao <a download="*.nzb"> assíncrono.
+    const cleaned = Array.from(String(title || ''), ch => {
+      const code = ch.charCodeAt(0);
+      return code < 0x20 || '/\\?%*:|"<>'.includes(ch) ? '' : ch;
+    }).join('').trim().slice(0, 200);
+    return `${cleaned || 'download'}.nzb`.toLowerCase();
+  }
+  function markNzbButton(btn, state, badgeText = '') {
+    if (!btn || !btn.isConnected) return;
+    btn.dataset.tbwdNzb = state;
+    const applyBadge = () => {
+      if (!btn.isConnected || btn.dataset.tbwdNzb !== state) return;
+      let badge = btn.querySelector('.tbwd-nzb-badge');
+      if (!badgeText) {
+        badge?.remove();
+        return;
+      }
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'tbwd-nzb-badge';
+        badge.setAttribute('aria-hidden', 'true');
+        btn.appendChild(badge);
+      }
+      badge.textContent = badgeText;
+    };
+    applyBadge();
+    setTimeout(applyBadge, 60);
+  }
+  function resolveNzbButton(filename) {
+    const key = String(filename || '').trim().toLowerCase();
+    const mapped = nzbButtonByFile.get(key);
+    if (mapped) nzbButtonByFile.delete(key);
+    if (mapped?.isConnected) return mapped;
+    if (lastNzbButton?.isConnected) {
+      const fallbackBtn = lastNzbButton;
+      lastNzbButton = null;
+      return fallbackBtn;
+    }
+    return null;
+  }
   function triggerLocalNzbFallback(xml, filename) {
     // Dispara o download nativo do arquivo .nzb para o app Arquivos do iOS caso
     // o envio direto para a API do TorBox falhe ou não haja API key configurada.
@@ -772,9 +862,11 @@
     parts.push(`--${boundary}--`, '');
     return { boundary, body: parts.join('\r\n'), cleanName: cleanName || safeFile };
   }
-  async function uploadNzbToTorBox(xml, filename) {
+  async function uploadNzbToTorBox(xml, filename, sourceBtn = null) {
+    if (!keyNow()) syncDmmApiKey(false);
     const key = keyNow();
     if (!key) {
+      markNzbButton(sourceBtn, 'error', '!');
       show(S.CONFIG, 'Configure a API key do TorBox para enviar NZBs direto. Baixando arquivo no iOS...');
       triggerLocalNzbFallback(xml, filename);
       return;
@@ -782,6 +874,7 @@
     const rev = revision;
     const { boundary, body, cleanName } = buildNzbMultipart(xml, filename);
     nzbInFlight++;
+    markNzbButton(sourceBtn, 'sending', '…');
     show(S.SENDING_NZB, `Enviando NZB limpo ao TorBox: ${cleanName}`);
     try {
       const res = await request(USENET_CREATE, `Bearer ${key}`, {
@@ -807,8 +900,10 @@
       }
       nzbBoostUntil = Date.now() + ACTIVE_WINDOW;
       activeCount = Math.max(1, activeCount);
+      markNzbButton(sourceBtn, 'sent', '✓ TorBox');
       show(S.OK, `NZB enviado ao TorBox: ${cleanName}. Acompanhando até ficar disponível no WebDAV.`);
     } catch (e) {
+      markNzbButton(sourceBtn, 'error', '!');
       if (key === keyNow() && rev === revision) {
         if (e.auth) {
           blockedAuth = true;
@@ -826,13 +921,24 @@
     }
   }
   function interceptDmmNzbClick(event) {
+    const nzbBtn = event.target?.closest?.(`button[aria-label^="${NZB_BTN_PREFIX}"]`);
+    if (nzbBtn) {
+      const label = String(nzbBtn.getAttribute('aria-label') || '');
+      const title = label.slice(NZB_BTN_PREFIX.length);
+      if (title) nzbButtonByFile.set(safeDmmNzbName(title), nzbBtn);
+      lastNzbButton = nzbBtn;
+      return;
+    }
     const anchorEl = event.target?.closest?.('a[download][href^="blob:"]');
     if (!anchorEl || anchorEl.dataset.tbwdFallback === '1') return;
     const filename = String(anchorEl.getAttribute('download') || '').trim();
     if (!/\.nzb$/i.test(filename)) return;
+    const sourceBtn = resolveNzbButton(filename);
+    if (!keyNow()) syncDmmApiKey(false);
     // Se não há chave configurada, deixa o download nativo do iOS seguir direto
     // sem recriar o Blob, apenas avisando no painel.
     if (!keyNow()) {
+      markNzbButton(sourceBtn, 'error', '!');
       show(S.CONFIG, 'Configure a API key do TorBox para enviar NZBs direto. Download local mantido.');
       return;
     }
@@ -845,7 +951,7 @@
     }
     event.preventDefault();
     event.stopImmediatePropagation();
-    void uploadNzbToTorBox(xml, filename);
+    void uploadNzbToTorBox(xml, filename, sourceBtn);
   }
   function explicitAuthError(res) {
     // Só códigos estruturados: texto de páginas de bloqueio não prova chave inválida.
@@ -1368,7 +1474,12 @@
     GM_addValueChangeListener(STATE, (_name, _old, _new, remote) => { if (remote) schedule(); });
   }
   if (IS_DMM) {
+    syncDmmApiKey(false);
     document.addEventListener('click', interceptDmmNzbClick, true);
+    window.addEventListener('storage', event => {
+      if (!event?.key || event.key === DMM_KEY) syncDmmApiKey(true);
+    });
+    window.addEventListener('local-storage', () => syncDmmApiKey(true));
   }
   document.addEventListener('visibilitychange', () => {
     if (visible()) { renderControl(); schedule(0); }
