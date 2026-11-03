@@ -47,9 +47,9 @@
  *     instância única de TextEncoder, MutationObserver sem alocação de arrays temporários
  *     e limite de retenção no mapa de botões NZB.
  *   - Renomeado para DMM X TorBox Auto Refresh, sincronização automática da API key do DMM
- *     (localStorage['tb:apiKey']) e feedback visual direto no botão NZB da linha.
+ *     (localStorage['tb:apiKey'], incluindo troca de conta) e feedback visual no botão NZB.
  *
- * DMM revalidado em 25/10/2026: v4.0.1 (commit eb67f35b, UsenetResults/nzbDownload/nzbSanitize).
+ * DMM revalidado em 02/11/2026: v4.0.1 (commit da3bd334, torbox/SavedAccounts/UsenetResults).
  * Endpoints preservados; círculo independente no celular e acima do nativo visível.
  * HTTP 429 da API pausa torrents e Usenet entre abas do userscript.
  * Contador: arquivos conhecidos; + indica arquivos ainda não enumerados.
@@ -497,9 +497,8 @@
     } catch { return ''; }
   }
   function syncDmmApiKey(notifyChange = true) {
-    if (keyNow()) return false;
     const dmmKey = readDmmTorBoxKey();
-    if (!dmmKey) return false;
+    if (!dmmKey || dmmKey === keyNow()) return false;
     GM_deleteValue(STATE);
     GM_setValue(KEY, dmmKey);
     if (notifyChange) changedSettings();
@@ -980,7 +979,7 @@
       throw error(`${name}: acesso bloqueado (HTTP 403); a resposta não confirma uma chave inválida. Nova tentativa automática.`, false, retryDelay(res.responseHeaders));
     if (res.status === 429)
       throw Object.assign(error(`${name}: limite temporário de requisições.`, false,
-        retryDelay(res.responseHeaders, 300000)), { rateLimited: true });
+        retryDelay(res.responseHeaders, 61000)), { rateLimited: true });
     if (res.status < 200 || res.status >= 300)
       throw error(`${name}: HTTP ${res.status || 'sem resposta'}.`);
   }
