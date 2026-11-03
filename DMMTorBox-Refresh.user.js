@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      2.6.0
+// @version      0.65
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -29,6 +29,7 @@
  * No DMM, sincroniza automaticamente a API key do TorBox (localStorage['tb:apiKey']) se ainda
  * não configurada, intercepta o clique em <a href="blob:..." download="*.nzb"> gerado pelo
  * botão NZB, lê o XML limpo sincronicamente antes do revokeObjectURL e envia direto ao TorBox
+ * via fetch() + FormData nativos (sem limite de 2 MiB da ponte GM_xmlhttpRequest do wBlock),
  * com feedback visual no próprio botão NZB da linha; se falhar ou não houver API key, faz o
  * download normal do .nzb no iOS como fallback.
  * Faz consultas enquanto a aba está visível; retoma ao voltar ao Safari.
@@ -39,23 +40,14 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
- * 2.6.0:
- *   - Renomeado para DMM X TorBox Auto Refresh.
- *   - Sincronização automática da API key do TorBox já salva no DMM (localStorage['tb:apiKey']).
- *   - Feedback visual direto no botão NZB da linha no DMM (enviando, ✓ TorBox ou alerta).
- * 2.5.1:
- *   - Proteção contra concorrência entre ciclo de polling e envio de NZB (nzbInFlight
- *     + janela de aceleração pós-envio), checagem de revisão após upload e validação
- *     de codepoints XML.
- * 2.5.0:
- *   - Interceptação direta de arquivos .nzb limpos no DMM (aba Usenet e /anonymize-nzb)
- *     com envio imediato para POST /v1/api/usenet/createusenetdownload e fallback local.
- * 2.4.0:
- *   - Refresh manual marca como sincronizados os itens prontos da última listagem.
- *   - cached_at fora da identidade (um único refresh extra após atualizar).
- *   - Espera aleatória antes das travas entre abas; diagnóstico informa finalUrl.
- *   - Estados centralizados, ciclo dividido em funções e painel no padrão visual do DMM 4.0.1.
- *   - Detecta explicitamente o código PLAN_RESTRICTED_FEATURE (plano gratuito do TorBox).
+ * 0.65:
+ *   - Upload de NZB via fetch() + FormData nativos como padrão (elimina montagem manual de
+ *     multipart em memória e supera o limite de 2 MiB do GM_xmlhttpRequest no wBlock iOS).
+ *   - Otimizações de memória e CPU: extração de metadados NZB restrita ao bloco <head>,
+ *     instância única de TextEncoder, MutationObserver sem alocação de arrays temporários
+ *     e limite de retenção no mapa de botões NZB.
+ *   - Renomeado para DMM X TorBox Auto Refresh, sincronização automática da API key do DMM
+ *     (localStorage['tb:apiKey']) e feedback visual direto no botão NZB da linha.
  *
  * DMM revalidado em 25/10/2026: v4.0.1 (commit eb67f35b, UsenetResults/nzbDownload/nzbSanitize).
  * Endpoints preservados; círculo independente no celular e acima do nativo visível.
@@ -72,7 +64,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '2.6.0';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.65';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -183,6 +175,7 @@
   const keyNow = () => String(read(KEY, '') || '').trim();
   const paused = () => read(PAUSE, false) === true;
   const visible = () => document.visibilityState !== 'hidden';
+  const TEXT_ENCODER = new TextEncoder();
   const toHex = bytes => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 
   // ----------------------------------------------------------- Posicionamento
@@ -240,9 +233,13 @@
       // atualizações do DMM e as mutações do nosso próprio indicador.
       const containsAnchor = node => node.nodeType === 1 && node !== button && node !== panel &&
         (node.matches?.(ANCHOR_SELECTOR) || node.querySelector?.(ANCHOR_SELECTOR));
+      const hasAnchorInList = list => {
+        for (const node of list) if (containsAnchor(node)) return true;
+        return false;
+      };
       new MutationObserver(records => {
-        if (anchor && !anchor.isConnected || records.some(record =>
-          [...record.addedNodes, ...record.removedNodes].some(containsAnchor))) queuePlacement();
+        if ((anchor && !anchor.isConnected) || records.some(record =>
+          hasAnchorInList(record.addedNodes) || hasAnchorInList(record.removedNodes))) queuePlacement();
       }).observe(document.body, { childList: true, subtree: true });
     }
     window.addEventListener('resize', queuePlacement);
@@ -707,7 +704,7 @@
     const ms = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
     return Number.isFinite(ms) ? Math.max(1000, ms) : fallback;
   }
-  function request(url, authorization, options = {}) {
+  function request(url, authorization) {
     // URLs fixas: nenhuma chave é enviada ao DMM ou colocada na query string.
     return new Promise((resolve, reject) => {
       let handle;
@@ -723,12 +720,11 @@
       };
       try {
         handle = GM_xmlhttpRequest({
-          method: options.method || 'GET', url, timeout: 30000, anonymous: true,
+          method: 'GET', url, timeout: 30000, anonymous: true,
           // "redirect" é extensão do Tampermonkey; gerenciadores que a ignoram
           // seguem o redirecionamento. Nesse caso valem finalUrl e validWebDAV.
           redirect: url === DAV ? 'follow' : 'error',
-          headers: { Authorization: authorization, 'Cache-Control': 'no-cache', ...options.headers },
-          ...(options.data !== undefined ? { data: options.data } : {}),
+          headers: { Authorization: authorization, 'Cache-Control': 'no-cache' },
           onload: finish(res => { recordResponse(url, res); resolve(res); }),
           onerror: finish(() => reject(error('Falha de conexão.'))),
           ontimeout: finish(() => reject(error('Tempo limite de conexão.'))),
@@ -739,6 +735,38 @@
         reject(error('O wBlock não conseguiu iniciar a requisição.'));
       }
     });
+  }
+  async function requestNzbUpload(key, form) {
+    // Usa fetch() + FormData nativos: api.torbox.app responde com CORS explícito
+    // para o DMM e o navegador envia o Blob em binário, sem duplicar strings em
+    // memória e sem o limite de 2 MiB da ponte IPC do GM_xmlhttpRequest no wBlock.
+    const controller = new AbortController();
+    const timerId = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch(USENET_CREATE, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}` },
+        body: form,
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: controller.signal
+      });
+      const responseText = await response.text();
+      const retryAfter = response.headers?.get?.('retry-after');
+      const res = {
+        status: response.status,
+        responseText,
+        responseHeaders: retryAfter ? `retry-after: ${retryAfter}` : ''
+      };
+      recordResponse(USENET_CREATE, res);
+      return res;
+    } catch (e) {
+      if (e?.name === 'AbortError') throw error('Tempo limite de conexão.');
+      throw error('Falha de conexão.');
+    } finally {
+      clearTimeout(timerId);
+    }
   }
 
   // ------------------------------------------------ Interceptação NZB no DMM
@@ -824,43 +852,23 @@
     );
   }
   function extractNzbMeta(xml, type) {
+    // No formato NZB 1.1, <head><meta> precede o primeiro <file>. Limitar a busca
+    // ao cabeçalho evita varrer megabytes de <segment> quando <head> não existe.
+    const headEnd = xml.indexOf('<file');
+    const head = headEnd > 0 ? xml.slice(0, headEnd) : xml.slice(0, 4096);
     const re = new RegExp(`<meta\\b[^>]*\\btype\\s*=\\s*["']${type}["'][^>]*>([\\s\\S]*?)<\\/meta>`, 'i');
-    const match = re.exec(xml);
+    const match = re.exec(head);
     return match ? decodeXmlText(match[1]).trim() : '';
   }
-  function buildNzbMultipart(xml, filename) {
-    // String multipart/form-data pura: atravessa a ponte JSON (browser.runtime.sendMessage)
-    // do wBlock no iOS sem depender de serialização nativa de FormData ou Blob.
-    let boundary = `----TorBoxWebDAVNzb${crypto.randomUUID().replace(/-/g, '')}`;
-    while (xml.includes(boundary)) boundary += crypto.randomUUID().slice(0, 8);
+  function buildNzbFormData(xml, filename) {
     const safeFile = filename.replace(/[\r\n"\\]/g, '_');
     const cleanName = safeFile.replace(/\.nzb$/i, '').trim();
     const password = extractNzbMeta(xml, 'password').replace(/\r?\n/g, ' ');
-    const parts = [
-      `--${boundary}`,
-      `Content-Disposition: form-data; name="file"; filename="${safeFile}"`,
-      'Content-Type: application/x-nzb',
-      '',
-      xml
-    ];
-    if (cleanName) {
-      parts.push(
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="name"',
-        '',
-        cleanName
-      );
-    }
-    if (password) {
-      parts.push(
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="password"',
-        '',
-        password
-      );
-    }
-    parts.push(`--${boundary}--`, '');
-    return { boundary, body: parts.join('\r\n'), cleanName: cleanName || safeFile };
+    const form = new FormData();
+    form.append('file', new Blob([xml], { type: 'application/x-nzb' }), safeFile);
+    if (cleanName) form.append('name', cleanName);
+    if (password) form.append('password', password);
+    return { form, cleanName: cleanName || safeFile };
   }
   async function uploadNzbToTorBox(xml, filename, sourceBtn = null) {
     if (!keyNow()) syncDmmApiKey(false);
@@ -872,16 +880,12 @@
       return;
     }
     const rev = revision;
-    const { boundary, body, cleanName } = buildNzbMultipart(xml, filename);
+    const { form, cleanName } = buildNzbFormData(xml, filename);
     nzbInFlight++;
     markNzbButton(sourceBtn, 'sending', '…');
     show(S.SENDING_NZB, `Enviando NZB limpo ao TorBox: ${cleanName}`);
     try {
-      const res = await request(USENET_CREATE, `Bearer ${key}`, {
-        method: 'POST',
-        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-        data: body
-      });
+      const res = await requestNzbUpload(key, form);
       checkCurrent(key, rev);
       try { checkHttp(res, 'TorBox Usenet'); }
       catch (e) {
@@ -925,7 +929,10 @@
     if (nzbBtn) {
       const label = String(nzbBtn.getAttribute('aria-label') || '');
       const title = label.slice(NZB_BTN_PREFIX.length);
-      if (title) nzbButtonByFile.set(safeDmmNzbName(title), nzbBtn);
+      if (title) {
+        if (nzbButtonByFile.size >= 32) nzbButtonByFile.delete(nzbButtonByFile.keys().next().value);
+        nzbButtonByFile.set(safeDmmNzbName(title), nzbBtn);
+      }
       lastNzbButton = nzbBtn;
       return;
     }
@@ -1036,7 +1043,7 @@
     const previous = cache.get(String(item.id));
     if (previous?.source === source) return previous.digest;
     files.sort((a, b) => a[0].localeCompare(b[0]));
-    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(values)));
+    const bytes = await crypto.subtle.digest('SHA-256', TEXT_ENCODER.encode(JSON.stringify(values)));
     checkCurrent(key, rev);
     const digest = toHex(bytes);
     if (previous) { cacheBytes[kind] -= previous.source.length * 2; cache.delete(String(item.id)); }
@@ -1208,7 +1215,7 @@
   // ------------------------------------------------- Coordenação entre abas
   async function pollingName(key, rev) {
     if (scopeKey === key && scopeName) return scopeName;
-    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
+    const bytes = await crypto.subtle.digest('SHA-256', TEXT_ENCODER.encode(key));
     checkCurrent(key, rev);
     scopeKey = key;
     scopeName = `tb_webdav_poll_v1_${toHex(bytes)}`;
