@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.65
+// @version      0.7
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -40,6 +40,12 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 0.7:
+ *   - Chips nativos no DMM: WEB-DL ▾ e Remux ▾ (Tiers 1–2, 1, 2, 3 e 1–3 do TRaSH Guides) e
+ *     Dolby Vision (DV, DoVi, Dolby Vision). Nas abas de torrents atualizam o #query como os
+ *     chips do DMM; na aba Usenet filtram as linhas das tabelas pelo título do release.
+ *     Estilo herdado dos chips nativos vivos do DMM. Dolby Vision inicia selecionado.
+ *
  * 0.65:
  *   - Upload de NZB via fetch() + FormData nativos como padrão (elimina montagem manual de
  *     multipart em memória e supera o limite de 2 MiB do GM_xmlhttpRequest no wBlock iOS).
@@ -64,7 +70,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.65';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.7';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1465,6 +1471,372 @@
     }
   }
 
+  // ------------------------------------- Filtros TRaSH Guides + Dolby Vision (DMM)
+  // Chips no mesmo padrão do DMM (AvailabilityTokens/SearchTokens). Nas abas de torrents
+  // o estado vive em #query, como os chips nativos: o quickSearch do DMM separa o texto por
+  // espaço e aplica AND entre os termos, então nenhum termo pode ter espaço nem começar com
+  // "-" (exclusão). Na aba Usenet não há #query: as linhas <tr> são ocultadas pelo título.
+  const FILTER_FORMATS = ['web', 'remux'];
+  const TIER_ORDER = ['12', '1', '2', '3', '123'];
+  const TIER_LABEL = { 12: 'Tiers 1–2', 1: 'Tier 1', 2: 'Tier 2', 3: 'Tier 3', 123: 'Tiers 1–3' };
+  const TIER_SHORT = { 12: 'T1–2', 1: 'T1', 2: 'T2', 3: 'T3', 123: 'T1–3' };
+  const DV_TOKEN = '\\b(dv|dovi|dolby.?vision)\\b';
+  // Grupos oficiais do TRaSH Guides (docs/json/{radarr,sonarr}/cf/web-tier-0x e remux-tier-0x,
+  // conferidos em 05/11/2026). O Sonarr não define Remux Tier 3.
+  const TRASH = {
+    web: {
+      label: 'WEB-DL', token: '\\bweb.?dl\\b',
+      tiers: {
+        movie: {
+          1: ['abbie', 'ajp69', 'apex', 'paxa', 'pexa', 'xepa', 'blutonium', 'byndr', 'cmrg', 'crfw', 'crud', 'flux',
+            'gnome', 'hone', 'kings', 'kitsune', 'madsky', 'nosivid', 'ntb', 'ntg', 'rawr', 'sic', 'tepes', 'thefarm',
+            'zorosenpai'],
+          2: ['db', 'flights', 'miu', 'monkee', 'mzabi', 'phoenix', 'playweb', 'sbr', 'smurf', 'tommy', 'xebec',
+            '4kbec', 'cebex'],
+          3: ['bloom', 'dooky', 'gnomission', 'ninjacentral', 'npms', 'roccat', 'sigma', 'slignome', 'swaglander']
+        },
+        show: {
+          1: ['abbie', 'ajp69', 'apex', 'paxa', 'pexa', 'xepa', 'casstudio', 'crfw', 'ctrlhd', 'flux', 'hone', 'kings',
+            'kitsune', 'madsky', 'monkee', 'nosivid', 'ntb', 'ntg', 'qoq', 'rawr', 'rtn', 'sic', 't6d', 'tommy', 'visum'],
+          2: ['3ctweb', 'blutonium', 'btw', 'byndr', 'chotab', 'cinefeel', 'cit', 'cmrg', 'coo7', 'db', 'deep', 'end',
+            'ethics', 'fc', 'flights', 'gnome', 'ijp', 'ika', 'it00nz', 'jetix', 'khn', 'kimchi', 'lazy', 'miu', 'mzabi',
+            'npms', 'nyh', 'orbitron', 'phoenix', 'playweb', 'psig', 'roccat', 'rtfm', 'sa89', 'sbr', 'sdcc', 'sigma',
+            'smurf', 'spirit', 'tepes', 'tvsmash', 'welp', 'xebec', '4kbec', 'cebex'],
+          3: ['bloom', 'dooky', 'dracula', 'ninjacentral', 'slignome', 'swaglander', 't4h', 'vision']
+        }
+      }
+    },
+    remux: {
+      label: 'Remux', token: '\\bremux\\b',
+      tiers: {
+        movie: {
+          1: ['3l', 'atelier', 'bizkit', 'bluranium', 'bmf', 'cinephiles', 'framestor', 'piramidhead', 'pmp', 'wildcat', 'zq'],
+          2: ['ncmt', 'playbd', 'sicfoi', 'surfinbird', 'tepes'],
+          3: ['12gaugeshotgun', 'decibel', 'epsilon', 'hifi', 'ift', 'kralimarko', 'ntb', 'ptp', 'sumvision', 'toa', 'triton']
+        },
+        show: {
+          1: ['bluranium', 'bmf', 'framestor', 'pmp'],
+          2: ['12gaugeshotgun', 'decibel', 'epsilon', 'hifi', 'kralimarko', 'playbd', 'pter', 'sicfoi', 'triton'],
+          3: []
+        }
+      }
+    }
+  };
+  const NATIVE_CHIP_BASE = 'cursor-pointer rounded border px-2 py-0.5 text-xs whitespace-nowrap transition-colors';
+  const FILTER_ROUTE = /^\/(movie|show|anime)\//;
+  const tierTokenCache = new Map();
+  let fMode = null;     // 'torrents' | 'usenet' | null
+  let fHost = null;
+  let fWrapper = null;  // apenas na aba Usenet
+  let fGroup = null;
+  let fChips = null;
+  let fMenu = null;
+  let fMenuFor = null;
+  let fFrame = 0;
+  // Dolby Vision começa selecionado; depois disso o usuário decide (Reset também o desliga).
+  let usenetState = { fmt: null, tier: null, dv: true };
+  let dvDefaultPath = '';
+
+  const isShowRoute = () => /^\/show\//.test(window.location.pathname);
+  function tierNames(fmt, tier, show) {
+    const names = new Set();
+    for (const n of tier) for (const g of TRASH[fmt].tiers[show ? 'show' : 'movie'][n]) names.add(g);
+    return names;
+  }
+  // Oculta tiers inexistentes (ex.: Remux Tier 3 no Sonarr) e combinações repetidas.
+  function tierAvailable(fmt, tier, show) {
+    const size = tierNames(fmt, tier, show).size;
+    if (!size) return false;
+    return tier.length === 1 || size > tierNames(fmt, tier.slice(0, -1), show).size;
+  }
+  function tierToken(fmt, tier, show) {
+    // O lookup de grupo exige hífen antes do nome ([-]...): evita falsos positivos com
+    // palavras do título (Deep, Don, Vision...). "[-]" no início também impede que o
+    // quickSearch trate o termo como exclusão.
+    const cacheKey = `${fmt}:${tier}:${show ? 1 : 0}`;
+    let token = tierTokenCache.get(cacheKey);
+    if (token) return token;
+    token = `[-](?:${[...tierNames(fmt, tier, show)].join('|')})\\b`;
+    tierTokenCache.set(cacheKey, token);
+    return token;
+  }
+  const OUR_TOKENS = (() => {
+    const all = new Set([DV_TOKEN]);
+    for (const fmt of FILTER_FORMATS) {
+      all.add(TRASH[fmt].token);
+      for (const tier of TIER_ORDER) { all.add(tierToken(fmt, tier, false)); all.add(tierToken(fmt, tier, true)); }
+    }
+    return all;
+  })();
+  function stateFromTerms(terms) {
+    const show = isShowRoute();
+    let fmt = null, tier = null;
+    for (const f of FILTER_FORMATS) {
+      if (!terms.includes(TRASH[f].token)) continue;
+      fmt = f;
+      tier = TIER_ORDER.find(t => terms.includes(tierToken(f, t, show))) || null;
+      break;
+    }
+    return { fmt, tier, dv: terms.includes(DV_TOKEN) };
+  }
+  function termsFromState(state) {
+    const terms = [];
+    if (state.fmt) {
+      terms.push(TRASH[state.fmt].token);
+      if (state.tier) terms.push(tierToken(state.fmt, state.tier, isShowRoute()));
+    }
+    if (state.dv) terms.push(DV_TOKEN);
+    return terms;
+  }
+  const queryInput = () => document.getElementById('query');
+  const queryTerms = () => String(queryInput()?.value || '').split(/\s+/).filter(Boolean);
+  function setQueryValue(next) {
+    const input = queryInput();
+    if (!input) return;
+    // Setter nativo do protótipo + evento "input": é o que faz o onChange controlado do
+    // React do DMM enxergar a mudança feita pelo userscript.
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, next);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const readFilterState = () => fMode === 'usenet' ? usenetState : stateFromTerms(queryTerms());
+  function commitFilter(next) {
+    if (fMode === 'torrents') {
+      const rest = queryTerms().filter(term => !OUR_TOKENS.has(term));
+      setQueryValue([...rest, ...termsFromState(next)].join(' '));
+    } else if (fMode === 'usenet') {
+      usenetState = next;
+      applyUsenetFilter();
+    }
+    renderFilterChips();
+  }
+  function applyUsenetFilter() {
+    if (fMode !== 'usenet') return;
+    const matchers = termsFromState(usenetState).map(term => new RegExp(term, 'i'));
+    for (const heading of document.querySelectorAll('h2 > button[aria-expanded]')) {
+      const section = heading.parentElement?.parentElement;
+      if (!section) continue;
+      for (const row of section.querySelectorAll('tbody > tr')) {
+        const title = row.firstElementChild?.textContent || '';
+        const hide = matchers.length > 0 && !matchers.every(m => m.test(title));
+        if (hide) {
+          if (row.style.display !== 'none') row.style.display = 'none';
+          row.dataset.tbwdHidden = '1';
+        } else if (row.dataset.tbwdHidden) {
+          row.style.display = '';
+          delete row.dataset.tbwdHidden;
+        }
+      }
+    }
+  }
+  function nativeChipClass(scope) {
+    // Herda tipografia, espaçamento e borda do chip nativo vivo no DMM (sem as cores),
+    // para acompanhar futuras mudanças visuais. Sem amostra, usa a classe atual do DMM.
+    const sample = scope?.querySelector('span.cursor-pointer.rounded.border:not(.tbwd-chip)');
+    const kept = String(sample?.className || NATIVE_CHIP_BASE).split(/\s+/).filter(c => c && !c.includes(':') &&
+      (!/^(?:bg|border|text)-/.test(c) || /^text-(?:xs|sm|base|lg|xl|\d+xl)$/.test(c) || /^border-\d+$/.test(c)));
+    return kept.join(' ') || NATIVE_CHIP_BASE;
+  }
+  function closeFilterMenu() {
+    if (!fMenu || fMenu.hidden) return;
+    fMenu.hidden = true;
+    fMenuFor = null;
+    for (const chip of [fChips?.web, fChips?.remux]) chip?.setAttribute('aria-expanded', 'false');
+  }
+  function openFilterMenu(fmt, chip) {
+    if (fMenuFor === fmt && fMenu && !fMenu.hidden) { closeFilterMenu(); return; }
+    if (!fMenu) {
+      fMenu = document.createElement('div');
+      fMenu.id = 'tbwd-filter-menu';
+      fMenu.hidden = true;
+      fMenu.setAttribute('role', 'menu');
+      document.body.appendChild(fMenu);
+    }
+    closeFilterMenu();
+    const state = readFilterState();
+    const items = [];
+    const item = (text, checked, handler) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'menuitemradio');
+      b.setAttribute('aria-checked', checked ? 'true' : 'false');
+      const label = document.createElement('span');
+      label.textContent = text;
+      b.appendChild(label);
+      if (checked) b.appendChild(document.createTextNode('✓'));
+      b.addEventListener('click', event => { event.stopPropagation(); closeFilterMenu(); handler(); });
+      items.push(b);
+    };
+    for (const tier of TIER_ORDER) {
+      if (!tierAvailable(fmt, tier, isShowRoute())) continue;
+      const active = state.fmt === fmt && state.tier === tier;
+      item(TIER_LABEL[tier], active, () => {
+        const now = readFilterState();
+        commitFilter(active ? { fmt: null, tier: null, dv: now.dv } : { fmt, tier, dv: now.dv });
+      });
+    }
+    if (state.fmt === fmt) item('Limpar filtro', false, () => commitFilter({ fmt: null, tier: null, dv: readFilterState().dv }));
+    fMenu.replaceChildren(...items);
+    fMenu.hidden = false;
+    fMenuFor = fmt;
+    chip.setAttribute('aria-expanded', 'true');
+    const rect = chip.getBoundingClientRect();
+    const width = fMenu.offsetWidth, height = fMenu.offsetHeight;
+    const viewportW = document.documentElement.clientWidth || window.innerWidth;
+    const viewportH = document.documentElement.clientHeight || window.innerHeight;
+    const below = rect.bottom + 4 + height <= viewportH || rect.top - 4 - height < 0;
+    fMenu.style.left = `${Math.max(8, Math.min(Math.round(rect.left), viewportW - width - 8))}px`;
+    fMenu.style.top = `${Math.round(below ? rect.bottom + 4 : rect.top - height - 4)}px`;
+  }
+  function makeFilterChip(tone, title, handler, hasMenu) {
+    const chip = document.createElement('span');
+    chip.className = `${fChipClass} tbwd-chip`;
+    chip.dataset.tbwdTone = tone;
+    chip.title = title;
+    chip.tabIndex = 0;
+    chip.setAttribute('role', 'button');
+    chip.setAttribute('aria-pressed', 'false');
+    if (hasMenu) { chip.setAttribute('aria-haspopup', 'menu'); chip.setAttribute('aria-expanded', 'false'); }
+    chip.addEventListener('click', event => { event.stopPropagation(); handler(chip); });
+    chip.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); handler(chip); }
+    });
+    return chip;
+  }
+  let fChipClass = NATIVE_CHIP_BASE;
+  function buildFilterGroup(scope) {
+    fChipClass = nativeChipClass(scope);
+    fGroup = document.createElement('div');
+    fGroup.className = 'flex shrink-0 flex-row flex-nowrap gap-1';
+    fGroup.dataset.tbwdFilters = '1';
+    fChips = {
+      web: makeFilterChip('web', 'Filtrar WEB-DL pelos tiers do TRaSH Guides', chip => openFilterMenu('web', chip), true),
+      remux: makeFilterChip('remux', 'Filtrar Remux pelos tiers do TRaSH Guides', chip => openFilterMenu('remux', chip), true),
+      dv: makeFilterChip('dv', 'Filtrar Dolby Vision (DV, DoVi, Dolby Vision)', () => {
+        const now = readFilterState();
+        commitFilter({ ...now, dv: !now.dv });
+      }, false)
+    };
+    fGroup.append(fChips.web, fChips.remux, fChips.dv);
+  }
+  function renderFilterChips() {
+    if (!fGroup?.isConnected) return;
+    const state = readFilterState();
+    const apply = (chip, active, text) => {
+      const pressed = active ? 'true' : 'false';
+      if (chip.getAttribute('aria-pressed') !== pressed) chip.setAttribute('aria-pressed', pressed);
+      if (chip.textContent !== text) chip.textContent = text;
+    };
+    for (const fmt of FILTER_FORMATS) {
+      const on = state.fmt === fmt;
+      apply(fChips[fmt], on, `${TRASH[fmt].label}${on && state.tier ? `: ${TIER_SHORT[state.tier]}` : ''}${on ? ' ✓' : ''} ▾`);
+    }
+    apply(fChips.dv, state.dv, state.dv ? 'Dolby Vision ✓' : 'Dolby Vision');
+  }
+  function findTokenBar() {
+    // Barra de chips logo abaixo do #query (filmes: a própria barra; séries: dentro do
+    // contêiner que também traz a navegação de episódios).
+    const next = queryInput()?.parentElement?.nextElementSibling;
+    if (!next) return null;
+    if (next.matches('.overflow-x-auto')) return next;
+    const bars = next.querySelectorAll(':scope > .overflow-x-auto');
+    return bars.length ? bars[bars.length - 1] : null;
+  }
+  function teardownFilterBar() {
+    closeFilterMenu();
+    (fWrapper || fGroup)?.remove();
+    fMode = null; fHost = null; fWrapper = null; fGroup = null; fChips = null;
+  }
+  function ensureFilterBar() {
+    if (!IS_DMM) return;
+    let mode = null, host = null, before = null;
+    if (FILTER_ROUTE.test(window.location.pathname)) {
+      const bar = findTokenBar();
+      if (bar) { mode = 'torrents'; host = bar; }
+      else if (/\/usenet\/?$/.test(window.location.pathname)) {
+        const section = document.querySelector('h2 > button[aria-expanded]')?.parentElement?.parentElement;
+        if (section?.parentElement) { mode = 'usenet'; host = section.parentElement; before = section; }
+      }
+    }
+    if (!mode) { if (fMode) teardownFilterBar(); return; }
+    if (fMode !== mode || fHost !== host || !fGroup?.isConnected) {
+      if (fMode) teardownFilterBar();
+      buildFilterGroup(mode === 'torrents' ? host : null);
+      fMode = mode; fHost = host;
+      if (mode === 'torrents') {
+        // Antes dos chips de cache (RD/TB/Any), como se fossem do próprio DMM.
+        const cache = host.querySelector(':scope > div > span[aria-pressed]:not(.tbwd-chip)')?.parentElement;
+        host.insertBefore(fGroup, cache || null);
+      } else {
+        fWrapper = document.createElement('div');
+        fWrapper.className = 'flex items-center gap-2 overflow-x-auto p-2';
+        fWrapper.appendChild(fGroup);
+        host.insertBefore(fWrapper, before);
+      }
+    }
+    // Padrão: Dolby Vision ligado uma vez por página (ex.: cada temporada), sem reimpor
+    // depois que o usuário o desligar ou usar o Reset.
+    if (mode === 'torrents' && dvDefaultPath !== window.location.pathname) {
+      dvDefaultPath = window.location.pathname;
+      const now = readFilterState();
+      if (!now.dv) commitFilter({ ...now, dv: true });
+    }
+    renderFilterChips();
+    if (mode === 'usenet') applyUsenetFilter();
+  }
+  function initDmmFilters() {
+    if (!IS_DMM || !document.body) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      .tbwd-chip { user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+      .tbwd-chip:focus-visible { outline:2px solid #22d3ee; outline-offset:2px; }
+      .tbwd-chip[data-tbwd-tone="web"] { border-color:#06b6d4; background:rgb(22 78 99 / .3); color:#cffafe; }
+      .tbwd-chip[data-tbwd-tone="remux"] { border-color:#f59e0b; background:rgb(120 53 15 / .3); color:#fef3c7; }
+      .tbwd-chip[data-tbwd-tone="dv"] { border-color:#a855f7; background:rgb(88 28 135 / .3); color:#f3e8ff; }
+      @media(hover:hover) {
+        .tbwd-chip[data-tbwd-tone="web"]:hover { background:rgb(21 94 117 / .5); }
+        .tbwd-chip[data-tbwd-tone="remux"]:hover { background:rgb(146 64 14 / .5); }
+        .tbwd-chip[data-tbwd-tone="dv"]:hover { background:rgb(107 33 168 / .5); }
+      }
+      .tbwd-chip[aria-pressed="true"][data-tbwd-tone="web"] { border-color:#22d3ee; background:#22d3ee; color:#000; }
+      .tbwd-chip[aria-pressed="true"][data-tbwd-tone="remux"] { border-color:#f59e0b; background:#f59e0b; color:#000; }
+      .tbwd-chip[aria-pressed="true"][data-tbwd-tone="dv"] { border-color:#a855f7; background:#a855f7; color:#fff; }
+      #tbwd-filter-menu {
+        box-sizing:border-box; position:fixed; z-index:50; margin:0; padding:4px; min-width:150px;
+        max-width:calc(100vw - 16px); display:grid; gap:2px; border:1px solid #374151; border-radius:8px;
+        background:#111827; color:#e5e7eb; font:12px/1.3 ui-sans-serif,system-ui,sans-serif;
+        box-shadow:0 10px 15px -3px rgb(0 0 0 / .4);
+      }
+      #tbwd-filter-menu[hidden] { display:none; }
+      #tbwd-filter-menu button {
+        appearance:none; -webkit-appearance:none; margin:0; padding:7px 10px; border:0; border-radius:4px;
+        background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer;
+        display:flex; justify-content:space-between; gap:12px; touch-action:manipulation;
+        -webkit-tap-highlight-color:transparent;
+      }
+      #tbwd-filter-menu button[aria-checked="true"] { background:#1f2937; color:#fff; font-weight:600; }
+      #tbwd-filter-menu button:focus-visible { outline:2px solid #22d3ee; outline-offset:-2px; }
+      @media(hover:hover) { #tbwd-filter-menu button:hover { background:#374151; } }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    const queue = () => {
+      if (fFrame) return;
+      fFrame = requestAnimationFrame(() => { fFrame = 0; ensureFilterBar(); });
+    };
+    // SPA do DMM: remonta a barra ao trocar de rota ou de aba (Torrents/Usenet).
+    new MutationObserver(queue).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener('input', event => { if (event.target?.id === 'query') renderFilterChips(); }, true);
+    // O botão Reset do DMM limpa o #query sem disparar "input".
+    document.addEventListener('click', () => setTimeout(queue, 50), true);
+    document.addEventListener('pointerdown', event => {
+      if (fMenu && !fMenu.hidden && !fMenu.contains(event.target) &&
+          !fChips?.web.contains(event.target) && !fChips?.remux.contains(event.target)) closeFilterMenu();
+    }, true);
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeFilterMenu(); });
+    document.addEventListener('scroll', event => { if (!fMenu?.contains(event.target)) closeFilterMenu(); }, true);
+    window.addEventListener('resize', closeFilterMenu);
+    queue();
+  }
+
   // ------------------------------------------------------------- Inicialização
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('TorBox: diagnóstico', showDiagnostics);
@@ -1486,6 +1858,7 @@
       if (!event?.key || event.key === DMM_KEY) syncDmmApiKey(true);
     });
     window.addEventListener('local-storage', () => syncDmmApiKey(true));
+    initDmmFilters();
   }
   document.addEventListener('visibilitychange', () => {
     if (visible()) { renderControl(); schedule(0); }
