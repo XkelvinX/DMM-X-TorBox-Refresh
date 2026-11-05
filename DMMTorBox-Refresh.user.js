@@ -1535,7 +1535,7 @@
   let fFrame = 0;
   // Dolby Vision começa selecionado; depois disso o usuário decide (Reset também o desliga).
   let usenetState = { fmt: null, tier: null, dv: true };
-  let dvDefaultPath = '';
+  let dvDefaultInput = null;
 
   const isShowRoute = () => /^\/show\//.test(window.location.pathname);
   function tierNames(fmt, tier, show) {
@@ -1773,10 +1773,10 @@
         host.insertBefore(fWrapper, before);
       }
     }
-    // Padrão: Dolby Vision ligado uma vez por página (ex.: cada temporada), sem reimpor
-    // depois que o usuário o desligar ou usar o Reset.
-    if (mode === 'torrents' && dvDefaultPath !== window.location.pathname) {
-      dvDefaultPath = window.location.pathname;
+    // Padrão: Dolby Vision ligado uma vez a cada montagem da página (nova instância do
+    // #query), sem reimpor depois que o usuário o desligar ou usar o Reset.
+    if (mode === 'torrents' && queryInput() && dvDefaultInput !== queryInput()) {
+      dvDefaultInput = queryInput();
       const now = readFilterState();
       if (!now.dv) commitFilter({ ...now, dv: true });
     }
