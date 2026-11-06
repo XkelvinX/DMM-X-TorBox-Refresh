@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.72
+// @version      0.73
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -40,6 +40,9 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 0.73:
+ *   - Tiers do TRaSH reconhecem o grupo após "- " (ex.: "English - HONE)"), não só "-HONE".
+ *
  * 0.72:
  *   - Botões WEB-DL ▾, Remux ▾, Dolby Vision e o chip nativo TB (movido, não copiado) no início da barra; padrão: WEB-DL
  *     Tiers 1–2 + Dolby Vision + TB. Cache dos regex do filtro Usenet.
@@ -74,7 +77,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.72';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.73';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1557,13 +1560,13 @@
     return tier.length === 1 || size > tierNames(fmt, tier.slice(0, -1), show).size;
   }
   function tierToken(fmt, tier, show) {
-    // O lookup de grupo exige hífen antes do nome ([-]...): evita falsos positivos com
+    // O lookup de grupo exige hífen antes do nome, com espaços opcionais ("- HONE)"): evita falsos positivos com
     // palavras do título (Deep, Don, Vision...). "[-]" no início também impede que o
     // quickSearch trate o termo como exclusão.
     const cacheKey = `${fmt}:${tier}:${show ? 1 : 0}`;
     let token = tierTokenCache.get(cacheKey);
     if (token) return token;
-    token = `[-](?:${[...tierNames(fmt, tier, show)].join('|')})\\b`;
+    token = `[-]\\s*(?:${[...tierNames(fmt, tier, show)].join('|')})\\b`;
     tierTokenCache.set(cacheKey, token);
     return token;
   }
