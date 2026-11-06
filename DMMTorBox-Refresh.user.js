@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.70
+// @version      0.71
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -40,6 +40,10 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 0.71:
+ *   - Botões WEB-DL ▾, Remux ▾, Dolby Vision e TB no início da barra de chips; padrão: WEB-DL
+ *     Tiers 1–2 + Dolby Vision + TB. Cache dos regex do filtro Usenet.
+ *
  * 0.70:
  *   - Chips nativos no DMM: WEB-DL ▾ e Remux ▾ (Tiers 1–2, 1, 2, 3 e 1–3 do TRaSH Guides) e
  *     Dolby Vision (DV, DoVi, Dolby Vision). Nas abas de torrents atualizam o #query como os
@@ -70,7 +74,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.70';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.71';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1534,8 +1538,11 @@
   let fMenuFor = null;
   let fFrame = 0;
   // Dolby Vision começa selecionado; depois disso o usuário decide (Reset também o desliga).
-  let usenetState = { fmt: null, tier: null, dv: true };
+  let usenetState = { fmt: 'web', tier: '12', dv: true };
   let dvDefaultInput = null;
+  let tbDefaultInput = null;
+  let usenetMatchKey = '';
+  let usenetMatchers = [];
 
   const isShowRoute = () => /^\/show\//.test(window.location.pathname);
   function tierNames(fmt, tier, show) {
@@ -1611,7 +1618,13 @@
   }
   function applyUsenetFilter() {
     if (fMode !== 'usenet') return;
-    const matchers = termsFromState(usenetState).map(term => new RegExp(term, 'i'));
+    const terms = termsFromState(usenetState);
+    const matchKey = terms.join(' ');
+    if (matchKey !== usenetMatchKey) {
+      usenetMatchKey = matchKey;
+      usenetMatchers = terms.map(term => new RegExp(term, 'i'));
+    }
+    const matchers = usenetMatchers;
     for (const heading of document.querySelectorAll('h2 > button[aria-expanded]')) {
       const section = heading.parentElement?.parentElement;
       if (!section) continue;
@@ -1714,9 +1727,16 @@
       dv: makeFilterChip('dv', 'Filtrar Dolby Vision (DV, DoVi, Dolby Vision)', () => {
         const now = readFilterState();
         commitFilter({ ...now, dv: !now.dv });
-      }, false)
+      }, false),
+      // Espelha o chip nativo "TB" do DMM (ocultado na posição original). O clique é repassado
+      // ao nativo, então a lógica de disponibilidade (is:tb) continua sendo a do próprio DMM.
+      tb: makeFilterChip('tb', 'Mostrar só resultados em cache no TorBox', () => nativeTbChip()?.click(), false)
     };
-    fGroup.append(fChips.web, fChips.remux, fChips.dv);
+    fChips.tb.hidden = true;
+    fGroup.append(fChips.web, fChips.remux, fChips.dv, fChips.tb);
+  }
+  function nativeTbChip() {
+    return fHost?.querySelector('span[aria-pressed][title="Show only results cached in TorBox"]:not(.tbwd-chip)') || null;
   }
   function renderFilterChips() {
     if (!fGroup?.isConnected) return;
@@ -1731,6 +1751,12 @@
       apply(fChips[fmt], on, `${TRASH[fmt].label}${on && state.tier ? `: ${TIER_SHORT[state.tier]}` : ''}${on ? ' ✓' : ''} ▾`);
     }
     apply(fChips.dv, state.dv, state.dv ? 'Dolby Vision ✓' : 'Dolby Vision');
+    const native = fMode === 'torrents' ? nativeTbChip() : null;
+    if (fChips.tb.hidden !== !native) fChips.tb.hidden = !native;
+    if (native) {
+      if (native.style.display !== 'none') native.style.display = 'none';
+      apply(fChips.tb, native.getAttribute('aria-pressed') === 'true', 'TB ✓');
+    }
   }
   function findTokenBar() {
     // Barra de chips logo abaixo do #query (filmes: a própria barra; séries: dentro do
@@ -1743,6 +1769,8 @@
   }
   function teardownFilterBar() {
     closeFilterMenu();
+    const native = nativeTbChip();
+    if (native) native.style.display = '';
     (fWrapper || fGroup)?.remove();
     fMode = null; fHost = null; fWrapper = null; fGroup = null; fChips = null;
   }
@@ -1763,9 +1791,8 @@
       buildFilterGroup(mode === 'torrents' ? host : null);
       fMode = mode; fHost = host;
       if (mode === 'torrents') {
-        // Antes dos chips de cache (RD/TB/Any), como se fossem do próprio DMM.
-        const cache = host.querySelector(':scope > div > span[aria-pressed]:not(.tbwd-chip)')?.parentElement;
-        host.insertBefore(fGroup, cache || null);
+        // No início da barra de chips, antes dos tokens de título do DMM.
+        host.insertBefore(fGroup, host.firstChild);
       } else {
         fWrapper = document.createElement('div');
         fWrapper.className = 'flex items-center gap-2 overflow-x-auto p-2';
@@ -1773,12 +1800,22 @@
         host.insertBefore(fWrapper, before);
       }
     }
-    // Padrão: Dolby Vision ligado uma vez a cada montagem da página (nova instância do
-    // #query), sem reimpor depois que o usuário o desligar ou usar o Reset.
+    // Padrão: WEB-DL Tiers 1–2 + Dolby Vision + TB, aplicado uma vez a cada montagem da
+    // página (nova instância do #query), sem reimpor depois que o usuário mudar ou usar o Reset.
+    // Se a busca já traz WEB-DL/Remux, o formato escolhido é respeitado.
     if (mode === 'torrents' && queryInput() && dvDefaultInput !== queryInput()) {
       dvDefaultInput = queryInput();
       const now = readFilterState();
-      if (!now.dv) commitFilter({ ...now, dv: true });
+      const next = now.fmt ? { ...now, dv: true } : { fmt: 'web', tier: '12', dv: true };
+      if (next.fmt !== now.fmt || next.tier !== now.tier || next.dv !== now.dv) commitFilter(next);
+    }
+    if (mode === 'torrents' && queryInput() && tbDefaultInput !== queryInput() && nativeTbChip()) {
+      tbDefaultInput = queryInput();
+      // Adiado: deixa o React concluir a atualização do #query antes do clique no chip nativo.
+      setTimeout(() => {
+        const native = nativeTbChip();
+        if (native && native.getAttribute('aria-pressed') !== 'true') native.click();
+      }, 120);
     }
     renderFilterChips();
     if (mode === 'usenet') applyUsenetFilter();
@@ -1791,7 +1828,10 @@
       .tbwd-chip:focus-visible { outline:2px solid #22d3ee; outline-offset:2px; }
       .tbwd-chip[data-tbwd-tone="web"] { border-color:#06b6d4; background:rgb(22 78 99 / .3); color:#cffafe; }
       .tbwd-chip[data-tbwd-tone="remux"] { border-color:#f59e0b; background:rgb(120 53 15 / .3); color:#fef3c7; }
+      .tbwd-chip[hidden] { display:none; }
       .tbwd-chip[data-tbwd-tone="dv"] { border-color:#a855f7; background:rgb(88 28 135 / .3); color:#f3e8ff; }
+      .tbwd-chip[data-tbwd-tone="tb"] { border-color:#4f46e5; background:rgb(79 70 229 / .2); color:#a5b4fc; }
+      .tbwd-chip[aria-pressed="true"][data-tbwd-tone="tb"] { border-color:#4f46e5; background:#4f46e5; color:#fff; }
       @media(hover:hover) {
         .tbwd-chip[data-tbwd-tone="web"]:hover { background:rgb(21 94 117 / .5); }
         .tbwd-chip[data-tbwd-tone="remux"]:hover { background:rgb(146 64 14 / .5); }
