@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.73
+// @version      0.74
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -40,6 +40,10 @@
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
  *
+ * 0.74:
+ *   - Sincronização bidirecional completa dos chips (WEB-DL, Remux e Dolby Vision) entre
+ *     as abas Torrents e Usenet. Reset na aba Torrents limpa filtros em ambas.
+ *
  * 0.73:
  *   - Tiers do TRaSH reconhecem o grupo após "- " (ex.: "English - HONE)"), não só "-HONE".
  *
@@ -77,7 +81,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.73';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.74';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1540,12 +1544,13 @@
   let fMenu = null;
   let fMenuFor = null;
   let fFrame = 0;
-  // Dolby Vision começa selecionado; depois disso o usuário decide (Reset também o desliga).
-  let usenetState = { fmt: 'web', tier: '12', dv: true };
-  let dvDefaultInput = null;
+  // Estado compartilhado dos filtros de qualidade entre as abas Torrents e Usenet.
+  let sharedFilterState = { fmt: 'web', tier: '12', dv: true };
+  let activeMediaKey = '';
   let tbDefaultInput = null;
   let usenetMatchKey = '';
   let usenetMatchers = [];
+  const mediaKey = () => window.location.pathname.replace(/\/usenet\/?$/, '').toLowerCase();
 
   const isShowRoute = () => /^\/show\//.test(window.location.pathname);
   function tierNames(fmt, tier, show) {
@@ -1608,20 +1613,20 @@
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, next);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  const readFilterState = () => fMode === 'usenet' ? usenetState : stateFromTerms(queryTerms());
+  const readFilterState = () => sharedFilterState;
   function commitFilter(next) {
+    sharedFilterState = next;
     if (fMode === 'torrents') {
       const rest = queryTerms().filter(term => !OUR_TOKENS.has(term));
       setQueryValue([...rest, ...termsFromState(next)].join(' '));
     } else if (fMode === 'usenet') {
-      usenetState = next;
       applyUsenetFilter();
     }
     renderFilterChips();
   }
   function applyUsenetFilter() {
     if (fMode !== 'usenet') return;
-    const terms = termsFromState(usenetState);
+    const terms = termsFromState(sharedFilterState);
     const matchKey = terms.join(' ');
     if (matchKey !== usenetMatchKey) {
       usenetMatchKey = matchKey;
@@ -1798,14 +1803,19 @@
         host.insertBefore(fWrapper, before);
       }
     }
-    // Padrão: WEB-DL Tiers 1–2 + Dolby Vision + TB, aplicado uma vez a cada montagem da
-    // página (nova instância do #query), sem reimpor depois que o usuário mudar ou usar o Reset.
-    // Se a busca já traz WEB-DL/Remux, o formato escolhido é respeitado.
-    if (mode === 'torrents' && queryInput() && dvDefaultInput !== queryInput()) {
-      dvDefaultInput = queryInput();
-      const now = readFilterState();
-      const next = now.fmt ? { ...now, dv: true } : { fmt: 'web', tier: '12', dv: true };
-      if (next.fmt !== now.fmt || next.tier !== now.tier || next.dv !== now.dv) commitFilter(next);
+    const currentMedia = mediaKey();
+    if (currentMedia && currentMedia !== activeMediaKey) {
+      activeMediaKey = currentMedia;
+      sharedFilterState = { fmt: 'web', tier: '12', dv: true };
+      tbDefaultInput = null;
+    }
+    if (mode === 'torrents' && queryInput()) {
+      // Sincroniza o #query recém-montado com o sharedFilterState mantido entre as abas.
+      const qState = stateFromTerms(queryTerms());
+      if (qState.fmt !== sharedFilterState.fmt || qState.tier !== sharedFilterState.tier || qState.dv !== sharedFilterState.dv) {
+        const rest = queryTerms().filter(term => !OUR_TOKENS.has(term));
+        setQueryValue([...rest, ...termsFromState(sharedFilterState)].join(' '));
+      }
     }
     if (mode === 'torrents' && queryInput() && tbDefaultInput !== queryInput() && nativeTbChip()) {
       tbDefaultInput = queryInput();
@@ -1862,9 +1872,19 @@
     };
     // SPA do DMM: remonta a barra ao trocar de rota ou de aba (Torrents/Usenet).
     new MutationObserver(queue).observe(document.body, { childList: true, subtree: true });
-    document.addEventListener('input', event => { if (event.target?.id === 'query') renderFilterChips(); }, true);
+    document.addEventListener('input', event => {
+      if (event.target?.id === 'query') {
+        if (fMode === 'torrents') sharedFilterState = stateFromTerms(queryTerms());
+        renderFilterChips();
+      }
+    }, true);
     // O botão Reset do DMM limpa o #query sem disparar "input".
-    document.addEventListener('click', () => setTimeout(queue, 50), true);
+    document.addEventListener('click', event => {
+      if (event.target?.closest?.('#reset') || event.target?.closest?.('span[title="Reset search"]')) {
+        sharedFilterState = { fmt: null, tier: null, dv: false };
+      }
+      setTimeout(queue, 50);
+    }, true);
     document.addEventListener('pointerdown', event => {
       if (fMenu && !fMenu.hidden && !fMenu.contains(event.target) &&
           !fChips?.web.contains(event.target) && !fChips?.remux.contains(event.target)) closeFilterMenu();
