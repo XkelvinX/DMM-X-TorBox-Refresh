@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.75
+// @version      0.76
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,11 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.76:
+ *   - Acelera a sondagem (3 s por 60 s) ao clicar nos botões nativos do DMM que adicionam
+ *     downloads ao TorBox (TorBox Usenet, Instant TB, DL with TB e TB Add).
+ *   - Limpeza de CSS e código órfão.
  *
  * 0.75:
  *   - Removida a interceptação e envio próprio de NZBs no DMM (agora nativo no DMM via
@@ -81,7 +86,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.75';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.76';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -168,6 +173,7 @@
   let panel, panelDetail, panelPause, panelDiag, panelDiagText, panelCopy;
   let successUntil = 0;
   let successTimer = null;
+  let actionBoostUntil = 0;
   let pendingCount = 0;
   let pendingDownloads = 0;
   let unknownCount = 0;
@@ -459,7 +465,19 @@
     return { version: 2, ready: s.ready, lastRefresh };
   }
   function pollDelay() {
-    return activeCount > 0 || Date.now() < successUntil ? ACTIVE_POLL : POLL;
+    return activeCount > 0 || Date.now() < successUntil || Date.now() < actionBoostUntil ? ACTIVE_POLL : POLL;
+  }
+  function boostPolling() {
+    actionBoostUntil = Date.now() + ACTIVE_WINDOW;
+    schedule(1200);
+  }
+  function isDmmTorBoxAction(target) {
+    const btn = target?.closest?.('button');
+    if (!btn || btn.disabled) return false;
+    const label = btn.getAttribute('aria-label') || '';
+    if (/^Send .+ to TorBox$/.test(label) || /^Instant TB \(/.test(label)) return true;
+    const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+    return /^(?:TorBox|(?:Instant|DL with) TB(?:\b|\s*\()|TB Add)$/.test(text);
   }
   function schedule(delay = pollDelay()) {
     clearTimeout(timer);
@@ -476,7 +494,7 @@
     manualPending = false;
     pendingCount = 0;
     pendingDownloads = 0; unknownCount = 0; activeCount = 0;
-    successUntil = 0;
+    successUntil = 0; actionBoostUntil = 0;
     lastReady = {}; lastCounts = {};
     clearTimeout(successTimer);
     for (const kind of KINDS) {
@@ -1527,7 +1545,6 @@
   }
   function teardownFilterBar() {
     closeFilterMenu();
-
     (fWrapper || fGroup)?.remove();
     fMode = null; fHost = null; fWrapper = null; fGroup = null; fChips = null;
   }
@@ -1591,9 +1608,7 @@
       .tbwd-chip:focus-visible { outline:2px solid #22d3ee; outline-offset:2px; }
       .tbwd-chip[data-tbwd-tone="web"] { border-color:#06b6d4; background:rgb(22 78 99 / .3); color:#cffafe; }
       .tbwd-chip[data-tbwd-tone="remux"] { border-color:#f59e0b; background:rgb(120 53 15 / .3); color:#fef3c7; }
-      .tbwd-chip[hidden] { display:none; }
       .tbwd-chip[data-tbwd-tone="dv"] { border-color:#a855f7; background:rgb(88 28 135 / .3); color:#f3e8ff; }
-
       @media(hover:hover) {
         .tbwd-chip[data-tbwd-tone="web"]:hover { background:rgb(21 94 117 / .5); }
         .tbwd-chip[data-tbwd-tone="remux"]:hover { background:rgb(146 64 14 / .5); }
@@ -1632,10 +1647,12 @@
         renderFilterChips();
       }
     }, true);
-    // O botão Reset do DMM limpa o #query sem disparar "input".
+    // O botão Reset do DMM limpa o #query sem disparar "input"; cliques de envio ao TorBox aceleram a sondagem.
     document.addEventListener('click', event => {
       if (event.target?.closest?.('#reset') || event.target?.closest?.('span[title="Reset search"]')) {
         sharedFilterState = { fmt: null, tier: null, dv: false };
+      } else if (isDmmTorBoxAction(event.target)) {
+        boostPolling();
       }
       setTimeout(queue, 50);
     }, true);
