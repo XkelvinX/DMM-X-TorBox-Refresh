@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.76
+// @version      0.77
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
-// @description  Sincroniza a API key do TorBox no DMM, adiciona filtros TRaSH Guides e Dolby Vision, acompanha torrents e Usenet e atualiza o WebDAV quando ficam disponíveis.
+// @description  Sincroniza a API key do TorBox no DMM, adiciona filtros TRaSH Guides, Dolby Vision e HDR10+, acompanha torrents e Usenet e atualiza o WebDAV quando ficam disponíveis.
 // @match        https://torbox.app/*
 // @match        https://www.torbox.app/*
 // @match        https://debridmediamanager.com/*
@@ -27,7 +27,7 @@
  * Fluxo: NZB e torrent enviados pelo DMM (nativamente) ou em torbox.app.
  * Não sobrescreve fetch/XHR da página: GM com privilégios roda isolado no wBlock atual.
  * No DMM, sincroniza automaticamente a API key do TorBox (localStorage['tb:apiKey'],
- * incluindo troca de conta) e adiciona os chips nativos de filtro TRaSH Guides e Dolby Vision.
+ * incluindo troca de conta) e adiciona os chips nativos de filtro TRaSH Guides, Dolby Vision e HDR10+.
  * Faz consultas enquanto a aba está visível; retoma ao voltar ao Safari.
  * Ao ocultar, conclui somente o ciclo já iniciado e o refresh dos itens prontos.
  * Sem novos ciclos/retries ocultos; tolerância de conclusão limitada a 60 s.
@@ -35,6 +35,14 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.77:
+ *   - Corrige o indicador travado em "?" ignorando itens antigos finalizados sem arquivos
+ *     (expurgados/removidos), inativos ou sem metadados há mais de 60 s no TorBox.
+ *   - Prioriza a exibição do "OK" por 6 s sempre que um refresh do WebDAV é concluído,
+ *     mesmo quando há outros downloads em andamento.
+ *   - Adiciona o chip HDR10+ (HDR10+, HDR10Plus, HDR10.Plus, HDR10p) ao lado do Dolby Vision,
+ *     mutuamente exclusivos e sincronizados entre as abas Torrents e Usenet.
  *
  * 0.76:
  *   - Acelera a sondagem (3 s por 60 s) ao clicar nos botões nativos do DMM que adicionam
@@ -86,7 +94,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.76';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.77';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -299,9 +307,10 @@
     let mode = 'idle', symbol = 'cloud', text = '';
     if (info.icon) symbol = info.icon;
     else if (info.problem) { mode = info.problem; symbol = 'alert'; }
+    else if (Date.now() < successUntil) { mode = 'success'; text = 'OK'; }
     else if (pendingCount > 0 || unknownCount > 0) {
       mode = 'pending'; text = pendingCount ? `${pendingCount}${unknownCount ? '+' : ''}` : '?';
-    } else if (Date.now() < successUntil) { mode = 'success'; text = 'OK'; }
+    }
     else if (info.clock) symbol = 'clock';
     else if (info.busy) mode = 'busy';
     const label = text || `icon:${symbol}`;
@@ -320,11 +329,11 @@
     detail = explanation;
     lastUiAt = Date.now();
     const info = STATUS_INFO[label];
-    if (label === S.OK && !pendingCount && !unknownCount) {
+    if (label === S.OK) {
       successUntil = Date.now() + 6000;
       clearTimeout(successTimer);
       successTimer = setTimeout(renderControl, 6000);
-    } else if (pendingCount > 0 || unknownCount > 0 || (info && !info.keepSuccess)) {
+    } else if (info && !info.keepSuccess) {
       successUntil = 0;
       clearTimeout(successTimer);
     }
@@ -853,24 +862,26 @@
     }
     const pendingIds = new Set();
     for (const item of items) {
+      if (ready(item) || item.download_finished === true || item.active === false) continue;
       const state = String(item.download_state || '').toLowerCase();
-      if (ready(item) || /error|failed|cancel|expired|missingfiles/.test(state)) continue;
-      result.downloads++;
+      if (/error|failed|cancel|expired|missingfiles|dead|deleted|removed/.test(state)) continue;
       const count = Array.isArray(item.files) ? item.files.length : 0;
-      result.files += count;
-      if (!count) result.unknown++;
       const id = String(item.id); pendingIds.add(id);
       const signature = JSON.stringify([state, item.progress, item.downloaded, item.download_present, count]);
       let activity = activityCache[kind].get(id);
       if (!activity || activity.signature !== signature) {
         activity = { signature, changedAt: Date.now() }; activityCache[kind].set(id, activity);
       }
-      // Pausados, sem sementes e filas ficam no ritmo normal. Estados ativos
-      // sem evolução também desaceleram após um minuto; retomam se houver progresso.
       const stopped = /paused|stalled|queued|stopped|inactive/.test(state);
       const working = /downloading|metadl|checking|processing|repair|unpack|extract|verif|moving/.test(state);
-      const finalizing = item.download_finished === true && item.download_present === true;
-      if (!stopped && (working || finalizing) && Date.now() - activity.changedAt < ACTIVE_WINDOW) result.active++;
+      const recent = Date.now() - activity.changedAt < ACTIVE_WINDOW;
+      // Itens sem arquivos enumerados (ex.: buscando metadados) só contam enquanto ativos e recentes,
+      // evitando que downloads travados/abandonados deixem o indicador preso em "?" indefinidamente.
+      if (!count && (stopped || !working || !recent)) continue;
+      result.downloads++;
+      result.files += count;
+      if (!count) result.unknown++;
+      if (!stopped && working && recent) result.active++;
     }
     for (const id of activityCache[kind].keys()) if (!pendingIds.has(id)) activityCache[kind].delete(id);
     return result;
@@ -1126,7 +1137,7 @@
     wakePending = true;
     failures = 0; retryAt = 0;
     updatePending(snapshot, counts);
-    show(pendingDownloads ? S.PENDING : S.OK,
+    show(S.OK,
       'Resposta válida recebida do WebDAV. Atualize a biblioteca no Infuse.' + pendingDetail());
     return POLL;
   }
@@ -1176,7 +1187,7 @@
     const inFlight = ctx.completed.size < KINDS.length;
     const label = !Object.keys(ctx.current).length && !inFlight ? S.API_DOWN
       : partial ? S.PARTIAL : inFlight ? S.CHECKING
-      : pendingDownloads ? S.PENDING : ctx.updated ? S.OK : S.MONITORING;
+      : ctx.updated ? S.OK : pendingDownloads ? S.PENDING : S.MONITORING;
     show(label, (ctx.updated ? 'Resposta válida recebida do WebDAV. Atualize a biblioteca no Infuse.'
       : inFlight ? 'Consultando as listas do TorBox.' : 'Monitoramento ativo enquanto esta aba estiver visível.')
       + pendingDetail() + partialDetail);
@@ -1254,7 +1265,7 @@
     }
   }
 
-  // ------------------------------------- Filtros TRaSH Guides + Dolby Vision (DMM)
+  // ----------------------------- Filtros TRaSH Guides + Dolby Vision / HDR10+ (DMM)
   // Chips no mesmo padrão do DMM (AvailabilityTokens/SearchTokens). Nas abas de torrents
   // o estado vive em #query, como os chips nativos: o quickSearch do DMM separa o texto por
   // espaço e aplica AND entre os termos, então nenhum termo pode ter espaço nem começar com
@@ -1264,6 +1275,7 @@
   const TIER_LABEL = { 12: 'Tiers 1–2', 1: 'Tier 1', 2: 'Tier 2', 3: 'Tier 3', 123: 'Tiers 1–3' };
   const TIER_SHORT = { 12: 'T1–2', 1: 'T1', 2: 'T2', 3: 'T3', 123: 'T1–3' };
   const DV_TOKEN = '\\b(dv|dovi|dolby.?vision)\\b';
+  const HDR10P_TOKEN = '\\bhdr10(?:\\+|(?:[-._]?plus|p)\\b)';
   // Grupos oficiais do TRaSH Guides (docs/json/{radarr,sonarr}/cf/web-tier-0x e remux-tier-0x,
   // conferidos em 05/11/2026). O Sonarr não define Remux Tier 3.
   const TRASH = {
@@ -1317,7 +1329,7 @@
   let fMenuFor = null;
   let fFrame = 0;
   // Estado compartilhado dos filtros de qualidade entre as abas Torrents e Usenet.
-  let sharedFilterState = { fmt: 'web', tier: '12', dv: true };
+  let sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
   let activeMediaKey = '';
   let tbDefaultInput = null;
   let usenetMatchKey = '';
@@ -1348,7 +1360,7 @@
     return token;
   }
   const OUR_TOKENS = (() => {
-    const all = new Set([DV_TOKEN]);
+    const all = new Set([DV_TOKEN, HDR10P_TOKEN]);
     for (const fmt of FILTER_FORMATS) {
       all.add(TRASH[fmt].token);
       for (const tier of TIER_ORDER) { all.add(tierToken(fmt, tier, false)); all.add(tierToken(fmt, tier, true)); }
@@ -1364,7 +1376,8 @@
       tier = TIER_ORDER.find(t => terms.includes(tierToken(f, t, show))) || null;
       break;
     }
-    return { fmt, tier, dv: terms.includes(DV_TOKEN) };
+    const hdr = terms.includes(DV_TOKEN) ? 'dv' : terms.includes(HDR10P_TOKEN) ? 'hdr10p' : null;
+    return { fmt, tier, hdr };
   }
   function termsFromState(state) {
     const terms = [];
@@ -1372,7 +1385,8 @@
       terms.push(TRASH[state.fmt].token);
       if (state.tier) terms.push(tierToken(state.fmt, state.tier, isShowRoute()));
     }
-    if (state.dv) terms.push(DV_TOKEN);
+    if (state.hdr === 'dv') terms.push(DV_TOKEN);
+    else if (state.hdr === 'hdr10p') terms.push(HDR10P_TOKEN);
     return terms;
   }
   const queryInput = () => document.getElementById('query');
@@ -1464,10 +1478,10 @@
       const active = state.fmt === fmt && state.tier === tier;
       item(TIER_LABEL[tier], active, () => {
         const now = readFilterState();
-        commitFilter(active ? { fmt: null, tier: null, dv: now.dv } : { fmt, tier, dv: now.dv });
+        commitFilter(active ? { fmt: null, tier: null, hdr: now.hdr } : { fmt, tier, hdr: now.hdr });
       });
     }
-    if (state.fmt === fmt) item('Limpar filtro', false, () => commitFilter({ fmt: null, tier: null, dv: readFilterState().dv }));
+    if (state.fmt === fmt) item('Limpar filtro', false, () => commitFilter({ fmt: null, tier: null, hdr: readFilterState().hdr }));
     fMenu.replaceChildren(...items);
     fMenu.hidden = false;
     fMenuFor = fmt;
@@ -1506,10 +1520,14 @@
       remux: makeFilterChip('remux', 'Filtrar Remux pelos tiers do TRaSH Guides', chip => openFilterMenu('remux', chip), true),
       dv: makeFilterChip('dv', 'Filtrar Dolby Vision (DV, DoVi, Dolby Vision)', () => {
         const now = readFilterState();
-        commitFilter({ ...now, dv: !now.dv });
+        commitFilter({ ...now, hdr: now.hdr === 'dv' ? null : 'dv' });
+      }, false),
+      hdr10p: makeFilterChip('hdr10p', 'Filtrar HDR10+ (HDR10+, HDR10Plus, HDR10.Plus, HDR10p)', () => {
+        const now = readFilterState();
+        commitFilter({ ...now, hdr: now.hdr === 'hdr10p' ? null : 'hdr10p' });
       }, false)
     };
-    fGroup.append(fChips.web, fChips.remux, fChips.dv);
+    fGroup.append(fChips.web, fChips.remux, fChips.dv, fChips.hdr10p);
   }
   function nativeTbChip() {
     return fHost?.querySelector('span[aria-pressed][title="Show only results cached in TorBox"]:not(.tbwd-chip)') || null;
@@ -1526,7 +1544,8 @@
       const on = state.fmt === fmt;
       apply(fChips[fmt], on, `${TRASH[fmt].label}${on && state.tier ? `: ${TIER_SHORT[state.tier]}` : ''}${on ? ' ✓' : ''} ▾`);
     }
-    apply(fChips.dv, state.dv, state.dv ? 'Dolby Vision ✓' : 'Dolby Vision');
+    apply(fChips.dv, state.hdr === 'dv', state.hdr === 'dv' ? 'Dolby Vision ✓' : 'Dolby Vision');
+    apply(fChips.hdr10p, state.hdr === 'hdr10p', state.hdr === 'hdr10p' ? 'HDR10+ ✓' : 'HDR10+');
   }
   function placeAvailability() {
     // Move (sem copiar) o grupo nativo de cache do DMM (TB ✓ etc.) para logo após os nossos
@@ -1577,13 +1596,13 @@
     const currentMedia = mediaKey();
     if (currentMedia && currentMedia !== activeMediaKey) {
       activeMediaKey = currentMedia;
-      sharedFilterState = { fmt: 'web', tier: '12', dv: true };
+      sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
       tbDefaultInput = null;
     }
     if (mode === 'torrents' && queryInput()) {
       // Sincroniza o #query recém-montado com o sharedFilterState mantido entre as abas.
       const qState = stateFromTerms(queryTerms());
-      if (qState.fmt !== sharedFilterState.fmt || qState.tier !== sharedFilterState.tier || qState.dv !== sharedFilterState.dv) {
+      if (qState.fmt !== sharedFilterState.fmt || qState.tier !== sharedFilterState.tier || qState.hdr !== sharedFilterState.hdr) {
         const rest = queryTerms().filter(term => !OUR_TOKENS.has(term));
         setQueryValue([...rest, ...termsFromState(sharedFilterState)].join(' '));
       }
@@ -1609,14 +1628,17 @@
       .tbwd-chip[data-tbwd-tone="web"] { border-color:#06b6d4; background:rgb(22 78 99 / .3); color:#cffafe; }
       .tbwd-chip[data-tbwd-tone="remux"] { border-color:#f59e0b; background:rgb(120 53 15 / .3); color:#fef3c7; }
       .tbwd-chip[data-tbwd-tone="dv"] { border-color:#a855f7; background:rgb(88 28 135 / .3); color:#f3e8ff; }
+      .tbwd-chip[data-tbwd-tone="hdr10p"] { border-color:#f43f5e; background:rgb(136 19 55 / .3); color:#ffe4e6; }
       @media(hover:hover) {
         .tbwd-chip[data-tbwd-tone="web"]:hover { background:rgb(21 94 117 / .5); }
         .tbwd-chip[data-tbwd-tone="remux"]:hover { background:rgb(146 64 14 / .5); }
         .tbwd-chip[data-tbwd-tone="dv"]:hover { background:rgb(107 33 168 / .5); }
+        .tbwd-chip[data-tbwd-tone="hdr10p"]:hover { background:rgb(159 18 57 / .5); }
       }
       .tbwd-chip[aria-pressed="true"][data-tbwd-tone="web"] { border-color:#22d3ee; background:#22d3ee; color:#000; }
       .tbwd-chip[aria-pressed="true"][data-tbwd-tone="remux"] { border-color:#f59e0b; background:#f59e0b; color:#000; }
       .tbwd-chip[aria-pressed="true"][data-tbwd-tone="dv"] { border-color:#a855f7; background:#a855f7; color:#fff; }
+      .tbwd-chip[aria-pressed="true"][data-tbwd-tone="hdr10p"] { border-color:#f43f5e; background:#f43f5e; color:#fff; }
       #tbwd-filter-menu {
         box-sizing:border-box; position:fixed; z-index:50; margin:0; padding:4px; min-width:150px;
         max-width:calc(100vw - 16px); display:grid; gap:2px; border:1px solid #374151; border-radius:8px;
@@ -1650,7 +1672,7 @@
     // O botão Reset do DMM limpa o #query sem disparar "input"; cliques de envio ao TorBox aceleram a sondagem.
     document.addEventListener('click', event => {
       if (event.target?.closest?.('#reset') || event.target?.closest?.('span[title="Reset search"]')) {
-        sharedFilterState = { fmt: null, tier: null, dv: false };
+        sharedFilterState = { fmt: null, tier: null, hdr: null };
       } else if (isDmmTorBoxAction(event.target)) {
         boostPolling();
       }
