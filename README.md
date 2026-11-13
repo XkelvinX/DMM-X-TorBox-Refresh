@@ -16,6 +16,8 @@ Built specifically for **iOS Safari (wBlock)** and desktop userscript managers (
 
 - **TRaSH Guides, Dolby Vision & HDR10+ Filter Chips (Torrents + Usenet Sync)**:
   Adds native-styled **`WEB-DL ▾`**, **`Remux ▾`** (with official Radarr/Sonarr TRaSH Guides Tiers 1–2, 1, 2, 3, and 1–3), **`Dolby Vision`**, and **`HDR10+`** (mutually exclusive with Dolby Vision) chips at the start of the DMM filter bar, followed immediately by DMM's native **`TB ✓`** cached filter. Defaults to **`WEB-DL: T1–2` + `Dolby Vision` + `TB ✓`** on load and synchronizes filter changes bidirectionally between the **Torrents** and **Usenet** tabs.
+- **Auto-Load All Releases (>2,000 Torrents)**:
+  Automatically clicks **`Show More Results`** when opening a title's Torrents tab until more than 2,000 unique torrents are found (or until all available pages finish loading).
 - **Zero-Touch API Key Sync from DMM**:
   If you have already connected your TorBox account in Debrid Media Manager (`localStorage['tb:apiKey']`), the userscript automatically imports your API key on first load, tracks account switches, and shares the key across `debridmediamanager.com` and `torbox.app`.
 - **Automatic WebDAV Refresh for Infuse**:

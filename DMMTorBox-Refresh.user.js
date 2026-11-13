@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.78
+// @version      0.79
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,10 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.79:
+ *   - Aciona automaticamente o botão "Show More Results" ao abrir a aba Torrents de um título
+ *     até ultrapassar 2000 torrents únicos encontrados (ou até os resultados terminarem).
  *
  * 0.78:
  *   - Deixa o botão circular flutuante sempre translúcido com desfoque de fundo (backdrop-filter: blur).
@@ -97,7 +101,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.78';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.79';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1323,6 +1327,14 @@
   };
   const NATIVE_CHIP_BASE = 'cursor-pointer rounded border px-2 py-0.5 text-xs whitespace-nowrap transition-colors';
   const FILTER_ROUTE = /^\/(movie|show|anime)\//;
+  const MORE_RESULTS_TARGET = 2000;
+  const TOAST_FOUND_RE = /^(?:(\d+)\s+unique torrents found\b|No torrents found$)/i;
+  const seenToasts = new WeakSet();
+  let hasVisitedTorrents = false;
+  let autoMorePath = '';
+  let autoMoreDone = false;
+  let autoMoreReady = false;
+  let autoMoreAnimeCount = 0;
   const tierTokenCache = new Map();
   let fMode = null;     // 'torrents' | 'usenet' | null
   let fHost = null;
@@ -1566,10 +1578,59 @@
     const bars = next.querySelectorAll(':scope > .overflow-x-auto');
     return bars.length ? bars[bars.length - 1] : null;
   }
+  function findShowMoreButton() {
+    for (const btn of document.querySelectorAll('button')) {
+      if (btn.textContent?.trim() === 'Show More Results') return btn;
+    }
+    return null;
+  }
+  function autoClickShowMore() {
+    if (autoMoreDone || fMode !== 'torrents') return;
+    let latestFound = null;
+    for (const el of document.querySelectorAll('[role="status"]')) {
+      if (seenToasts.has(el)) continue;
+      const match = el.textContent?.trim().match(TOAST_FOUND_RE);
+      if (!match) continue;
+      seenToasts.add(el);
+      const count = match[1] ? Number(match[1]) : 0;
+      latestFound = latestFound === null ? count : Math.max(latestFound, count);
+    }
+    if (latestFound !== null) {
+      autoMoreAnimeCount = latestFound;
+      if (latestFound > MORE_RESULTS_TARGET) {
+        autoMoreDone = true;
+        autoMoreReady = false;
+        return;
+      }
+      autoMoreReady = true;
+    }
+    if (!autoMoreReady && /^\/anime\//.test(window.location.pathname) && autoMoreAnimeCount > 0) {
+      const nextBtn = findShowMoreButton();
+      if (nextBtn && !nextBtn.dataset.tbwdClicked) {
+        autoMoreAnimeCount += 50;
+        if (autoMoreAnimeCount > MORE_RESULTS_TARGET) {
+          autoMoreDone = true;
+          return;
+        }
+        autoMoreReady = true;
+      }
+    }
+    if (!autoMoreReady) return;
+    const btn = findShowMoreButton();
+    if (btn && !btn.dataset.tbwdClicked) {
+      btn.dataset.tbwdClicked = '1';
+      autoMoreReady = false;
+      btn.click();
+    } else if (!btn && !document.querySelector('[data-testid="search-source-progress"]')) {
+      autoMoreDone = true;
+      autoMoreReady = false;
+    }
+  }
   function teardownFilterBar() {
     closeFilterMenu();
     (fWrapper || fGroup)?.remove();
     fMode = null; fHost = null; fWrapper = null; fGroup = null; fChips = null;
+    autoMorePath = ''; autoMoreDone = false; autoMoreReady = false; autoMoreAnimeCount = 0;
   }
   function ensureFilterBar() {
     if (!IS_DMM) return;
@@ -1618,6 +1679,19 @@
         const native = nativeTbChip();
         if (native && native.getAttribute('aria-pressed') !== 'true') native.click();
       }, 120);
+    }
+    if (mode === 'torrents') {
+      if (window.location.pathname !== autoMorePath) {
+        if (hasVisitedTorrents) {
+          for (const el of document.querySelectorAll('[role="status"]')) seenToasts.add(el);
+        }
+        hasVisitedTorrents = true;
+        autoMorePath = window.location.pathname;
+        autoMoreDone = false;
+        autoMoreReady = false;
+        autoMoreAnimeCount = 0;
+      }
+      autoClickShowMore();
     }
     placeAvailability();
     renderFilterChips();
