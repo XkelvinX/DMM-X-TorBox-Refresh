@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.77
+// @version      0.78
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,9 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.78:
+ *   - Deixa o botão circular flutuante sempre translúcido com desfoque de fundo (backdrop-filter: blur).
  *
  * 0.77:
  *   - Corrige o indicador travado em "?" ignorando itens antigos finalizados sem arquivos
@@ -94,7 +97,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.77';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.78';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -607,7 +610,8 @@
         box-sizing:border-box; appearance:none; -webkit-appearance:none;
         position:fixed; margin:0; padding:0; width:36px; height:36px;
         min-width:36px; min-height:36px; max-width:36px; max-height:36px;
-        border:1px solid #374151; border-radius:9999px; background:#1f2937;
+        border:1px solid rgb(55 65 81 / .6); border-radius:9999px; background:rgb(31 41 55 / .5);
+        backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);
         color:#9ca3af; display:grid; place-items:center; cursor:pointer;
         font-family:ui-sans-serif,system-ui,sans-serif;
         font-size:13px; font-weight:500; line-height:1; letter-spacing:normal;
@@ -631,7 +635,7 @@
       #tbwd-control[data-digits="many"] { font-size:10px; }
       #tbwd-control:focus-visible { outline:2px solid #22d3ee; outline-offset:4px; }
       @media(hover:hover) {
-        #tbwd-control:hover { border-color:#6b7280; color:#e5e7eb; }
+        #tbwd-control:hover { background:rgb(55 65 81 / .5); border-color:rgb(107 114 128 / .7); color:#e5e7eb; }
         #tbwd-control[data-state="busy"]:hover { background:rgb(21 94 117 / .5); color:#67e8f9; }
         #tbwd-control[data-state="warning"]:hover { background:rgb(133 77 14 / .5); }
         #tbwd-control[data-state="error"]:hover { background:rgb(153 27 27 / .5); }
