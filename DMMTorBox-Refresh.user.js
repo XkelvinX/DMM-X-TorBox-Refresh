@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.80
+// @version      0.81
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,16 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.81:
+ *   - Corrige isDmmTorBoxAction para "DL with TB (archive)" e o botão "TB" em /hashlist,
+ *     e libera boostPolling() para furar a espera ociosa do lease local quando não há outra
+ *     aba consultando nem backoff de erro/429.
+ *   - Preserva a escolha do chip nativo TB ✓ ao alternar entre Torrents e Usenet no mesmo título.
+ *   - Pausa autoMoreTimer ao ocultar a aba e encerra a paginação automática diante de erro do DMM (HTTP 403).
+ *   - Unifica os MutationObservers em document.body, restringe o re-sync de clique ao Reset,
+ *     isola o título na aba Usenet (sem colar o badge "Season pack"), usa a URL canônica
+ *     https://webdav.torbox.app/refresh/ e adiciona FIEND ao Radarr WEB Tier 03.
  *
  * 0.80:
  *   - Acelera o "Show More Results" pulando a espera pelo toast de cache nas páginas
@@ -91,7 +101,7 @@
  *   - Renomeado para DMM X TorBox Auto Refresh, sincronização automática da API key do DMM
  *     (localStorage['tb:apiKey'], incluindo troca de conta) e feedback visual no botão NZB.
  *
- * DMM revalidado em 02/11/2026: v4.0.1 (commit da3bd334, torbox/SavedAccounts/UsenetResults).
+ * DMM revalidado em 19/11/2026: v4.0.1 (commit b227010, AvailabilityTokens/SearchControls/FloatingLibraryIndicator/UsenetResults/torbox).
  * Endpoints preservados; círculo independente no celular e acima do nativo visível.
  * HTTP 429 da API pausa torrents e Usenet entre abas do userscript.
  * Contador: arquivos conhecidos; + indica arquivos ainda não enumerados.
@@ -106,10 +116,10 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.79';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.81';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
-  const DAV = 'https://webdav.torbox.app/refresh';
+  const DAV = 'https://webdav.torbox.app/refresh/';
   const KEY = 'torbox_api_key'; // Mantém a chave se editar o userscript antigo.
   const DMM_KEY = 'tb:apiKey';
   const STATE = 'tb_webdav_v2_state';
@@ -194,6 +204,7 @@
   let successUntil = 0;
   let successTimer = null;
   let actionBoostUntil = 0;
+  let boostPending = false;
   let pendingCount = 0;
   let pendingDownloads = 0;
   let unknownCount = 0;
@@ -265,17 +276,38 @@
       sizeObserver.observe(button);
     }
     if (IS_DMM) {
-      // Detecta a montagem/troca do balão em rotas SPA, ignorando as demais
-      // atualizações do DMM e as mutações do nosso próprio indicador.
-      const containsAnchor = node => node.nodeType === 1 && node !== button && node !== panel &&
-        (node.matches?.(ANCHOR_SELECTOR) || node.querySelector?.(ANCHOR_SELECTOR));
+      // Observador único em document.body: reposiciona o balão e sincroniza a barra de filtros,
+      // ignorando mutações exclusivas da nossa própria interface.
+      const isOwnUiNode = node => !!node && (
+        node === button || button?.contains(node) ||
+        node === panel || panel?.contains(node) ||
+        node === fMenu || fMenu?.contains(node)
+      );
+      const listHasOnlyOwn = list => {
+        for (const node of list) if (!isOwnUiNode(node)) return false;
+        return true;
+      };
+      const isOwnRecord = record => isOwnUiNode(record.target) || (
+        (record.addedNodes.length > 0 || record.removedNodes.length > 0) &&
+        listHasOnlyOwn(record.addedNodes) && listHasOnlyOwn(record.removedNodes)
+      );
       const hasAnchorInList = list => {
-        for (const node of list) if (containsAnchor(node)) return true;
+        for (const node of list) {
+          if (node.nodeType === 1 && !isOwnUiNode(node) &&
+              (node.matches?.(ANCHOR_SELECTOR) || node.querySelector?.(ANCHOR_SELECTOR))) return true;
+        }
         return false;
       };
       new MutationObserver(records => {
-        if ((anchor && !anchor.isConnected) || records.some(record =>
-          hasAnchorInList(record.addedNodes) || hasAnchorInList(record.removedNodes))) queuePlacement();
+        let placementChanged = !!anchor && !anchor.isConnected;
+        let pageChanged = false;
+        for (const record of records) {
+          if (isOwnRecord(record)) continue;
+          pageChanged = true;
+          if (hasAnchorInList(record.addedNodes) || hasAnchorInList(record.removedNodes)) placementChanged = true;
+        }
+        if (placementChanged) queuePlacement();
+        if (pageChanged) dmmFilterQueue?.();
       }).observe(document.body, { childList: true, subtree: true });
     }
     window.addEventListener('resize', queuePlacement);
@@ -490,6 +522,7 @@
   }
   function boostPolling() {
     actionBoostUntil = Date.now() + ACTIVE_WINDOW;
+    boostPending = true;
     schedule(1200);
   }
   function isDmmTorBoxAction(target) {
@@ -498,7 +531,8 @@
     const label = btn.getAttribute('aria-label') || '';
     if (/^Send .+ to TorBox$/.test(label) || /^Instant TB \(/.test(label)) return true;
     const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
-    return /^(?:TorBox|(?:Instant|DL with) TB(?:\b|\s*\()|TB Add)$/.test(text);
+    if (/^(?:TorBox|(?:Instant|DL with) TB(?:\s*\([^)]*\))?|TB Add)$/.test(text)) return true;
+    return text === 'TB' && /^\/hashlist\b/.test(window.location.pathname);
   }
   function schedule(delay = pollDelay()) {
     clearTimeout(timer);
@@ -515,7 +549,7 @@
     manualPending = false;
     pendingCount = 0;
     pendingDownloads = 0; unknownCount = 0; activeCount = 0;
-    successUntil = 0; actionBoostUntil = 0;
+    successUntil = 0; actionBoostUntil = 0; boostPending = false;
     lastReady = {}; lastCounts = {};
     clearTimeout(successTimer);
     for (const kind of KINDS) {
@@ -726,6 +760,7 @@
     buildPanel();
     show(status, detail);
     watchPlacement();
+    if (IS_DMM) initDmmFilters();
   }
 
   // -------------------------------------------------------------------- HTTP
@@ -1078,22 +1113,24 @@
     if (successUntil > Date.now()) successTimer = setTimeout(renderControl, successUntil - Date.now());
     renderControl();
   }
-  function heldLease(name) {
+  function heldLease(name, bypassCooldown = false) {
     const held = read(name, null);
     const now = Date.now();
-    return !!held && (
-      (Number.isFinite(held.until) && held.until > now && held.until <= now + POLL_LEASE_MS + 5000) ||
-      (Number.isFinite(held.nextAt) && held.nextAt > now && held.nextAt <= now + 86400000));
+    if (!held) return false;
+    if (Number.isFinite(held.until) && held.until > now && held.until <= now + POLL_LEASE_MS + 5000) return true;
+    if (bypassCooldown && !held.backoff) return false;
+    return Number.isFinite(held.nextAt) && held.nextAt > now && held.nextAt <= now + 86400000;
   }
   async function acquirePolling(key, rev) {
     const name = await pollingName(key, rev);
     checkActive(key, rev);
     readPollReport(name);
-    if (heldLease(name)) return false;
+    const bypass = boostPending && Date.now() < actionBoostUntil;
+    if (heldLease(name, bypass)) return false;
     // Mesma espera aleatória da trava do refresh: reduz disputas simultâneas.
     await jitter();
     checkActive(key, rev);
-    if (heldLease(name)) return false;
+    if (heldLease(name, bypass)) return false;
     const ticket = { name, token: crypto.randomUUID(), rev };
     GM_setValue(name, { owner: ticket.token, until: Date.now() + POLL_LEASE_MS, nextAt: 0 });
     try {
@@ -1105,6 +1142,7 @@
     }
     if (!ownsPolling(ticket)) return false;
     pollTicket = ticket;
+    boostPending = false;
     const renew = () => {
       if (pollTicket !== ticket || !ownsPolling(ticket)) return;
       if ((!visible() && !canFinishHidden()) || paused() || revision !== rev || key !== keyNow()) {
@@ -1132,7 +1170,8 @@
       });
     }
     GM_setValue(ticket.name, {
-      owner: ticket.token, until: 0, nextAt: Date.now() + Math.max(0, delay)
+      owner: ticket.token, until: 0, nextAt: Date.now() + Math.max(0, delay),
+      backoff: Date.now() < retryAt
     });
   }
 
@@ -1290,7 +1329,7 @@
   const DV_TOKEN = '\\b(dv|dovi|dolby.?vision)\\b';
   const HDR10P_TOKEN = '\\bhdr10(?:\\+|(?:[-._]?plus|p)\\b)';
   // Grupos oficiais do TRaSH Guides (docs/json/{radarr,sonarr}/cf/web-tier-0x e remux-tier-0x,
-  // conferidos em 05/11/2026). O Sonarr não define Remux Tier 3.
+  // conferidos em 19/11/2026). O Sonarr não define Remux Tier 3.
   const TRASH = {
     web: {
       label: 'WEB-DL', token: '\\bweb.?dl\\b',
@@ -1301,7 +1340,7 @@
             'zorosenpai'],
           2: ['db', 'flights', 'miu', 'monkee', 'mzabi', 'phoenix', 'playweb', 'sbr', 'smurf', 'tommy', 'xebec',
             '4kbec', 'cebex'],
-          3: ['bloom', 'dooky', 'gnomission', 'ninjacentral', 'npms', 'roccat', 'sigma', 'slignome', 'swaglander']
+          3: ['bloom', 'dooky', 'fiend', 'gnomission', 'ninjacentral', 'npms', 'roccat', 'sigma', 'slignome', 'swaglander']
         },
         show: {
           1: ['abbie', 'ajp69', 'apex', 'paxa', 'pexa', 'xepa', 'casstudio', 'crfw', 'ctrlhd', 'flux', 'hone', 'kings',
@@ -1353,10 +1392,14 @@
   let fMenu = null;
   let fMenuFor = null;
   let fFrame = 0;
+  let dmmFilterQueue = null;
+  let filtersInitialized = false;
   // Estado compartilhado dos filtros de qualidade entre as abas Torrents e Usenet.
   let sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
   let activeMediaKey = '';
-  let tbDefaultInput = null;
+  let sharedTb = true;
+  let tbSyncedInput = null;
+  let syncingQuery = false;
   let usenetMatchKey = '';
   let usenetMatchers = [];
   const mediaKey = () => window.location.pathname.replace(/\/usenet\/?$/, '').toLowerCase();
@@ -1421,8 +1464,13 @@
     if (!input) return;
     // Setter nativo do protótipo + evento "input": é o que faz o onChange controlado do
     // React do DMM enxergar a mudança feita pelo userscript.
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, next);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
+    syncingQuery = true;
+    try {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, next);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    } finally {
+      syncingQuery = false;
+    }
   }
   const readFilterState = () => sharedFilterState;
   function commitFilter(next) {
@@ -1448,7 +1496,12 @@
       const section = heading.parentElement?.parentElement;
       if (!section) continue;
       for (const row of section.querySelectorAll('tbody > tr')) {
-        const title = row.firstElementChild?.textContent || '';
+        const cell = row.firstElementChild;
+        let title = '';
+        if (cell) {
+          for (const node of cell.childNodes) if (node.nodeType === 3) title += node.textContent;
+          title = title.trim() || cell.textContent || '';
+        }
         const hide = matchers.length > 0 && !matchers.every(m => m.test(title));
         if (hide) {
           if (row.style.display !== 'none') row.style.display = 'none';
@@ -1602,8 +1655,19 @@
     autoMoreClicks = 0;
     autoMoreNextAt = 0;
   }
+  function hasSearchError() {
+    for (const el of document.querySelectorAll('div.bg-red-900.border-red-400')) {
+      if (el.querySelector('strong')?.textContent?.trim() === 'Error:') return true;
+    }
+    return false;
+  }
   function autoClickShowMore() {
-    if (autoMoreDone || fMode !== 'torrents') return;
+    if (autoMoreDone || fMode !== 'torrents' || !visible()) return;
+    if (hasSearchError()) {
+      resetAutoMore();
+      autoMoreDone = true;
+      return;
+    }
     for (const el of document.querySelectorAll('[role="status"]')) {
       if (seenToasts.has(el)) continue;
       const match = el.textContent?.trim().match(TOAST_FOUND_RE);
@@ -1692,7 +1756,8 @@
     if (currentMedia && currentMedia !== activeMediaKey) {
       activeMediaKey = currentMedia;
       sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
-      tbDefaultInput = null;
+      sharedTb = true;
+      tbSyncedInput = null;
     }
     if (mode === 'torrents' && queryInput()) {
       // Sincroniza o #query recém-montado com o sharedFilterState mantido entre as abas.
@@ -1702,13 +1767,17 @@
         setQueryValue([...rest, ...termsFromState(sharedFilterState)].join(' '));
       }
     }
-    if (mode === 'torrents' && queryInput() && tbDefaultInput !== queryInput() && nativeTbChip()) {
-      tbDefaultInput = queryInput();
-      // Adiado: deixa o React concluir a atualização do #query antes do clique no chip nativo.
-      setTimeout(() => {
-        const native = nativeTbChip();
-        if (native && native.getAttribute('aria-pressed') !== 'true') native.click();
-      }, 120);
+    if (mode === 'torrents' && queryInput() && tbSyncedInput !== queryInput() && nativeTbChip()) {
+      tbSyncedInput = queryInput();
+      if (sharedTb) {
+        // Adiado: deixa o React concluir a atualização do #query antes do clique no chip nativo.
+        const mediaAtSchedule = activeMediaKey;
+        setTimeout(() => {
+          if (!sharedTb || activeMediaKey !== mediaAtSchedule) return;
+          const native = nativeTbChip();
+          if (native && native.getAttribute('aria-pressed') !== 'true') native.click();
+        }, 120);
+      }
     }
     if (mode === 'torrents') {
       if (window.location.pathname !== autoMorePath) {
@@ -1726,7 +1795,8 @@
     if (mode === 'usenet') applyUsenetFilter();
   }
   function initDmmFilters() {
-    if (!IS_DMM || !document.body) return;
+    if (!IS_DMM || !document.body || filtersInitialized) return;
+    filtersInitialized = true;
     const style = document.createElement('style');
     style.textContent = `
       .tbwd-chip { user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
@@ -1767,22 +1837,32 @@
       if (fFrame) return;
       fFrame = requestAnimationFrame(() => { fFrame = 0; ensureFilterBar(); });
     };
-    // SPA do DMM: remonta a barra ao trocar de rota ou de aba (Torrents/Usenet).
-    new MutationObserver(queue).observe(document.body, { childList: true, subtree: true });
+    dmmFilterQueue = queue;
     document.addEventListener('input', event => {
+      if (syncingQuery) return;
       if (event.target?.id === 'query') {
-        if (fMode === 'torrents') sharedFilterState = stateFromTerms(queryTerms());
+        if (fMode === 'torrents') {
+          const terms = queryTerms();
+          sharedFilterState = stateFromTerms(terms);
+          sharedTb = terms.includes('is:tb');
+        }
         renderFilterChips();
       }
     }, true);
-    // O botão Reset do DMM limpa o #query sem disparar "input"; cliques de envio ao TorBox aceleram a sondagem.
+    // O botão Reset do DMM limpa o #query sem disparar "input"; cliques em disponibilidade atualizam sharedTb;
+    // cliques de envio ao TorBox aceleram a sondagem.
     document.addEventListener('click', event => {
       if (event.target?.closest?.('#reset') || event.target?.closest?.('span[title="Reset search"]')) {
         sharedFilterState = { fmt: null, tier: null, hdr: null };
-      } else if (isDmmTorBoxAction(event.target)) {
-        boostPolling();
+        sharedTb = false;
+        setTimeout(queue, 50);
+      } else {
+        const native = nativeTbChip();
+        const availChip = native?.parentElement?.contains(event.target)
+          ? event.target.closest?.('span[aria-pressed]') : null;
+        if (availChip) sharedTb = availChip === native ? native.getAttribute('aria-pressed') !== 'true' : false;
+        else if (isDmmTorBoxAction(event.target)) boostPolling();
       }
-      setTimeout(queue, 50);
     }, true);
     document.addEventListener('pointerdown', event => {
       if (fMenu && !fMenu.hidden && !fMenu.contains(event.target) &&
@@ -1817,9 +1897,14 @@
     initDmmFilters();
   }
   document.addEventListener('visibilitychange', () => {
-    if (visible()) { renderControl(); schedule(0); }
-    else {
+    if (visible()) {
+      renderControl();
+      schedule(0);
+      if (IS_DMM && fMode === 'torrents' && !autoMoreDone) autoClickShowMore();
+    } else {
       clearTimeout(timer);
+      clearTimeout(autoMoreTimer);
+      autoMoreTimer = 0;
       // Não abre um ciclo. Apenas autoriza a conclusão daquele que já consultava.
       if (running && finishEligible && !pollInvalidated) {
         if (!finishUntil) finishUntil = Date.now() + FINISH_WINDOW;
@@ -1829,7 +1914,10 @@
   window.addEventListener('pageshow', () => { renderControl(); schedule(0); });
   window.addEventListener('online', () => schedule(0));
   window.addEventListener('pagehide', () => {
-    clearTimeout(timer); finishEligible = false; finishUntil = 0;
+    clearTimeout(timer);
+    clearTimeout(autoMoreTimer);
+    autoMoreTimer = 0;
+    finishEligible = false; finishUntil = 0;
     releasePolling(0, false);
   });
   mount();

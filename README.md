@@ -17,11 +17,11 @@ Built specifically for **iOS Safari (wBlock)** and desktop userscript managers (
 - **TRaSH Guides, Dolby Vision & HDR10+ Filter Chips (Torrents + Usenet Sync)**:
   Adds native-styled **`WEB-DL ▾`**, **`Remux ▾`** (with official Radarr/Sonarr TRaSH Guides Tiers 1–2, 1, 2, 3, and 1–3), **`Dolby Vision`**, and **`HDR10+`** (mutually exclusive with Dolby Vision) chips at the start of the DMM filter bar, followed immediately by DMM's native **`TB ✓`** cached filter. Defaults to **`WEB-DL: T1–2` + `Dolby Vision` + `TB ✓`** on load and synchronizes filter changes bidirectionally between the **Torrents** and **Usenet** tabs.
 - **Auto-Load All Releases (>2,000 Torrents)**:
-  Automatically clicks **`Show More Results`** when opening a title's Torrents tab until more than 2,000 unique torrents are found (or until all available pages finish loading).
+  Automatically clicks **`Show More Results`** when opening a title's Torrents tab until more than 2,000 unique torrents are found (or until all available pages finish loading), skipping intermediate cache-check waits within the 100/page bound while respecting DMM's 2.1s rate-limit window, pausing in hidden tabs, and stopping on error banners.
 - **Zero-Touch API Key Sync from DMM**:
   If you have already connected your TorBox account in Debrid Media Manager (`localStorage['tb:apiKey']`), the userscript automatically imports your API key on first load, tracks account switches, and shares the key across `debridmediamanager.com` and `torbox.app`.
 - **Automatic WebDAV Refresh for Infuse**:
-  Tracks both **Torrents** (`/v1/api/torrents/mylist`) and **Usenet** (`/v1/api/usenet/mylist`), accelerating polling to every 3 seconds whenever you send a Torrent or Usenet release from DMM to TorBox. As soon as a new file finishes processing (`download_finished` + `download_present`), the script triggers `https://webdav.torbox.app/refresh` so your WebDAV directory updates immediately.
+  Tracks both **Torrents** (`/v1/api/torrents/mylist`) and **Usenet** (`/v1/api/usenet/mylist`), accelerating polling to every 3 seconds whenever you send a Torrent or Usenet release from DMM to TorBox. As soon as a new file finishes processing (`download_finished` + `download_present`), the script triggers `https://webdav.torbox.app/refresh/` so your WebDAV directory updates immediately.
 - **Cross-Tab Coordination & Battery-Friendly Lifecycle**:
   Uses cooperative cross-tab leases so multiple open DMM/TorBox tabs never duplicate API requests or WebDAV refreshes. Runs only while the tab is visible (with a 60-second grace window to finish an already-started cycle when switching apps on iOS).
 - **Native DMM Dark UI**:
