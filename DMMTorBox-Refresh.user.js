@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.82
+// @version      0.83
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,9 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.83:
+ *   - Corrige HTTP 404 no refresh do WebDAV restaurando a URL sem barra final (https://webdav.torbox.app/refresh).
  *
  * 0.82:
  *   - Aumenta o limite automático de "Show More Results" de 2000 para 3500 torrents únicos encontrados.
@@ -119,10 +122,10 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.82';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.83';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
-  const DAV = 'https://webdav.torbox.app/refresh/';
+  const DAV = 'https://webdav.torbox.app/refresh';
   const KEY = 'torbox_api_key'; // Mantém a chave se editar o userscript antigo.
   const DMM_KEY = 'tb:apiKey';
   const STATE = 'tb_webdav_v2_state';
