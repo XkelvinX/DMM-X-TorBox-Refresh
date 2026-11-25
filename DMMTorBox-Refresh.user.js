@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.83
+// @version      0.84
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,10 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.84:
+ *   - Mantém apenas uma notificação do DMM visível por vez (#_rht_toaster), substituindo
+ *     imediatamente avisos anteriores sem acúmulo e sem afetar a leitura de contagem.
  *
  * 0.83:
  *   - Corrige HTTP 404 no refresh do WebDAV restaurando a URL sem barra final (https://webdav.torbox.app/refresh).
@@ -122,7 +126,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.83';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.84';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -313,7 +317,7 @@
           if (hasAnchorInList(record.addedNodes) || hasAnchorInList(record.removedNodes)) placementChanged = true;
         }
         if (placementChanged) queuePlacement();
-        if (pageChanged) dmmFilterQueue?.();
+        if (pageChanged) { collapseToasts(); dmmFilterQueue?.(); }
       }).observe(document.body, { childList: true, subtree: true });
     }
     window.addEventListener('resize', queuePlacement);
@@ -1652,6 +1656,14 @@
     }
     return null;
   }
+  function collapseToasts() {
+    const toaster = document.getElementById('_rht_toaster');
+    if (!toaster) return;
+    for (let i = 1; i < toaster.children.length; i++) {
+      const child = toaster.children[i];
+      if (!child.dataset.tbwdSuperseded) child.dataset.tbwdSuperseded = '1';
+    }
+  }
   function resetAutoMore() {
     clearTimeout(autoMoreTimer);
     autoMoreTimer = 0;
@@ -1734,6 +1746,7 @@
   }
   function ensureFilterBar() {
     if (!IS_DMM) return;
+    collapseToasts();
     let mode = null, host = null, before = null;
     if (FILTER_ROUTE.test(window.location.pathname)) {
       const bar = findTokenBar();
@@ -1837,6 +1850,9 @@
       #tbwd-filter-menu button[aria-checked="true"] { background:#1f2937; color:#fff; font-weight:600; }
       #tbwd-filter-menu button:focus-visible { outline:2px solid #22d3ee; outline-offset:-2px; }
       @media(hover:hover) { #tbwd-filter-menu button:hover { background:#374151; } }
+      #_rht_toaster > div:not(:first-child),
+      #_rht_toaster > div[data-tbwd-superseded="1"] { display:none !important; }
+      #_rht_toaster > div:first-child { transform:none !important; }
     `;
     (document.head || document.documentElement).appendChild(style);
     const queue = () => {
