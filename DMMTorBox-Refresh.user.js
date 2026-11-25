@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.85
+// @version      0.86
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,11 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.86:
+ *   - Corrige o contêiner de notificações do DMM para [data-rht-toaster] (react-hot-toast 2.6.1
+ *     em produção no DMM), eliminando o seletor obsoleto #_rht_toaster e zerando a transição do
+ *     wrapper para evitar sobreposição fantasma de 230 ms ao trocar notificações.
  *
  * 0.85:
  *   - Refatora a notificação única do DMM para um estado positivo único (data-tbwd-active)
@@ -132,7 +137,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.85';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.86';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1679,7 +1684,8 @@
     }
   }
   function syncToaster() {
-    const toaster = document.getElementById('_rht_toaster');
+    if (toastHost?.isConnected) return;
+    const toaster = document.querySelector('[data-rht-toaster]');
     if (toaster === toastHost) return;
     toastObserver?.disconnect();
     toastObserver = null;
@@ -1786,7 +1792,6 @@
   }
   function ensureFilterBar() {
     if (!IS_DMM) return;
-    syncToaster();
     let mode = null, host = null, before = null;
     if (FILTER_ROUTE.test(window.location.pathname)) {
       const bar = findTokenBar();
@@ -1890,9 +1895,9 @@
       #tbwd-filter-menu button[aria-checked="true"] { background:#1f2937; color:#fff; font-weight:600; }
       #tbwd-filter-menu button:focus-visible { outline:2px solid #22d3ee; outline-offset:-2px; }
       @media(hover:hover) { #tbwd-filter-menu button:hover { background:#374151; } }
-      #_rht_toaster > div { transform:none !important; }
-      #_rht_toaster > div:not([data-tbwd-active="1"]) { visibility:hidden !important; opacity:0 !important; pointer-events:none !important; }
-      #_rht_toaster > div:not([data-tbwd-active="1"]) * { pointer-events:none !important; }
+      [data-rht-toaster] > div { transform:none !important; transition:none !important; }
+      [data-rht-toaster] > div:not([data-tbwd-active="1"]) { visibility:hidden !important; opacity:0 !important; pointer-events:none !important; }
+      [data-rht-toaster] > div:not([data-tbwd-active="1"]) * { pointer-events:none !important; }
     `;
     (document.head || document.documentElement).appendChild(style);
     syncToaster();
