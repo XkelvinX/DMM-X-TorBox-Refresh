@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.84
+// @version      0.85
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,12 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.85:
+ *   - Refatora a notificação única do DMM para um estado positivo único (data-tbwd-active)
+ *     com observação dedicada em #_rht_toaster e ocultação por visibility/opacity: preserva a
+ *     medição de altura do react-hot-toast, suporta toasts atualizados no lugar ({ id }) e
+ *     reconecta automaticamente ao remontar o contêiner em navegações SPA.
  *
  * 0.84:
  *   - Mantém apenas uma notificação do DMM visível por vez (#_rht_toaster), substituindo
@@ -126,7 +132,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.84';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.85';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -317,7 +323,7 @@
           if (hasAnchorInList(record.addedNodes) || hasAnchorInList(record.removedNodes)) placementChanged = true;
         }
         if (placementChanged) queuePlacement();
-        if (pageChanged) { collapseToasts(); dmmFilterQueue?.(); }
+        if (pageChanged) { syncToaster(); dmmFilterQueue?.(); }
       }).observe(document.body, { childList: true, subtree: true });
     }
     window.addEventListener('resize', queuePlacement);
@@ -1403,6 +1409,8 @@
   let fMenuFor = null;
   let fFrame = 0;
   let dmmFilterQueue = null;
+  let toastHost = null;
+  let toastObserver = null;
   let filtersInitialized = false;
   // Estado compartilhado dos filtros de qualidade entre as abas Torrents e Usenet.
   let sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
@@ -1656,13 +1664,45 @@
     }
     return null;
   }
-  function collapseToasts() {
-    const toaster = document.getElementById('_rht_toaster');
-    if (!toaster) return;
-    for (let i = 1; i < toaster.children.length; i++) {
-      const child = toaster.children[i];
-      if (!child.dataset.tbwdSuperseded) child.dataset.tbwdSuperseded = '1';
+  function toastWrapper(node, toaster) {
+    let cur = node?.nodeType === 1 ? node : node?.parentElement;
+    while (cur && cur.parentElement !== toaster) cur = cur.parentElement;
+    return cur || null;
+  }
+  function setActiveToast(toaster, target) {
+    for (const child of toaster.children) {
+      if (child === target) {
+        if (child.dataset.tbwdActive !== '1') child.dataset.tbwdActive = '1';
+      } else if (child.dataset.tbwdActive) {
+        delete child.dataset.tbwdActive;
+      }
     }
+  }
+  function syncToaster() {
+    const toaster = document.getElementById('_rht_toaster');
+    if (toaster === toastHost) return;
+    toastObserver?.disconnect();
+    toastObserver = null;
+    toastHost = toaster;
+    if (!toaster) return;
+    if (toaster.firstElementChild) setActiveToast(toaster, toaster.firstElementChild);
+    toastObserver = new MutationObserver(records => {
+      let added = null, updated = null;
+      for (const record of records) {
+        if (record.target === toaster) {
+          for (const node of record.addedNodes) {
+            if (node.nodeType === 1 && node.parentElement === toaster &&
+                (!added || node === toaster.firstElementChild)) added = node;
+          }
+        } else {
+          const wrap = toastWrapper(record.target, toaster);
+          if (wrap && wrap.isConnected) updated = wrap;
+        }
+      }
+      const next = added || updated;
+      if (next) setActiveToast(toaster, next);
+    });
+    toastObserver.observe(toaster, { childList: true, subtree: true, characterData: true });
   }
   function resetAutoMore() {
     clearTimeout(autoMoreTimer);
@@ -1746,7 +1786,7 @@
   }
   function ensureFilterBar() {
     if (!IS_DMM) return;
-    collapseToasts();
+    syncToaster();
     let mode = null, host = null, before = null;
     if (FILTER_ROUTE.test(window.location.pathname)) {
       const bar = findTokenBar();
@@ -1850,11 +1890,12 @@
       #tbwd-filter-menu button[aria-checked="true"] { background:#1f2937; color:#fff; font-weight:600; }
       #tbwd-filter-menu button:focus-visible { outline:2px solid #22d3ee; outline-offset:-2px; }
       @media(hover:hover) { #tbwd-filter-menu button:hover { background:#374151; } }
-      #_rht_toaster > div:not(:first-child),
-      #_rht_toaster > div[data-tbwd-superseded="1"] { display:none !important; }
-      #_rht_toaster > div:first-child { transform:none !important; }
+      #_rht_toaster > div { transform:none !important; }
+      #_rht_toaster > div:not([data-tbwd-active="1"]) { visibility:hidden !important; opacity:0 !important; pointer-events:none !important; }
+      #_rht_toaster > div:not([data-tbwd-active="1"]) * { pointer-events:none !important; }
     `;
     (document.head || document.documentElement).appendChild(style);
+    syncToaster();
     const queue = () => {
       if (fFrame) return;
       fFrame = requestAnimationFrame(() => { fFrame = 0; ensureFilterBar(); });
