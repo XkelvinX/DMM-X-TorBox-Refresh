@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.87
+// @version      0.88
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,14 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.88:
+ *   - Reduz o limite automático de "Show More Results" de 3500 para 3000 torrents únicos encontrados.
+ *   - Otimiza a busca por "Show More Results" (HTMLCollection reversa em O(1) no rodapé), evita
+ *     varreduras redundantes da âncora no MutationObserver quando já conectada e elimina
+ *     serializações JSON.stringify desnecessárias em repouso.
+ *   - Trata HTTP 403 UPGRADE_REQUIRED e NO_AUTH da OpenAPI atual do TorBox como restrição/erro
+ *     de conta sem entrar em loop de retentativas.
  *
  * 0.87:
  *   - Define Tier 1 como padrão nos filtros iniciais (WEB-DL: T1 + Dolby Vision + TB ✓) e
@@ -126,22 +134,21 @@
  *   - Renomeado para DMM X TorBox Auto Refresh, sincronização automática da API key do DMM
  *     (localStorage['tb:apiKey'], incluindo troca de conta) e feedback visual no botão NZB.
  *
- * DMM revalidado em 19/11/2026: v4.0.1 (commit b227010, AvailabilityTokens/SearchControls/FloatingLibraryIndicator/UsenetResults/torbox).
+ * Revalidado em 25/11/2026:
+ *   - DMM v4.0.1 (commit e32b96b; react-hot-toast 2.6.1 [data-rht-toaster];
+ *     AvailabilityTokens/SearchControls/FloatingLibraryIndicator/UsenetResults/torbox).
+ *   - TorBox API v1 (https://api.torbox.app/openapi.json) e WebDAV /refresh
+ *     (https://support.torbox.app/en/articles/14662867-torbox-webdav).
+ *   - wBlock 3.2.3 (main e98c14a; UserScript.swift e userscript-injector.js).
  * Endpoints preservados; círculo independente no celular e acima do nativo visível.
  * HTTP 429 da API pausa torrents e Usenet entre abas do userscript.
  * Contador: arquivos conhecidos; + indica arquivos ainda não enumerados.
- * Fontes da implementação original, auditadas em 21/09/2026:
- * DMM main d803050b8b17c21bdf05821ca4ea384e12a2da64
- *   src/services/torbox.ts; torbox.postman_collection.json
- * wBlock 3.1.0 e main 66426f4913f97b5d26986f16b6b9bbb1d2f261d7
- *   wBlock Scripts (iOS)/Resources/userscript-injector.js
- * https://support.torbox.app/en/articles/14662867-torbox-webdav
  */
 (() => {
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.87';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.88';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -329,7 +336,7 @@
         for (const record of records) {
           if (isOwnRecord(record)) continue;
           pageChanged = true;
-          if (hasAnchorInList(record.addedNodes) || hasAnchorInList(record.removedNodes)) placementChanged = true;
+          if (!placementChanged && !anchor?.isConnected && hasAnchorInList(record.addedNodes)) placementChanged = true;
         }
         if (placementChanged) queuePlacement();
         if (pageChanged) { syncToaster(); dmmFilterQueue?.(); }
@@ -837,8 +844,8 @@
       const body = JSON.parse(String(res.responseText || ''));
       const code = String(typeof body?.error === 'string' ? body.error
         : body?.error?.code || body?.code || '').toUpperCase();
-      if (code === 'PLAN_RESTRICTED_FEATURE') return 'PLAN_RESTRICTED_FEATURE';
-      return /^(?:BAD_TOKEN|INVALID_TOKEN|EXPIRED_TOKEN|INVALID_API_KEY|API_KEY_INVALID|AUTH_ERROR|AUTHENTICATION_ERROR|UNAUTHORIZED)$/.test(code) ? 'AUTH' : '';
+      if (code === 'PLAN_RESTRICTED_FEATURE' || code === 'UPGRADE_REQUIRED') return 'PLAN_RESTRICTED_FEATURE';
+      return /^(?:NO_AUTH|BAD_TOKEN|INVALID_TOKEN|EXPIRED_TOKEN|INVALID_API_KEY|API_KEY_INVALID|AUTH_ERROR|AUTHENTICATION_ERROR|UNAUTHORIZED)$/.test(code) ? 'AUTH' : '';
     } catch { return ''; }
   }
   function checkHttp(res, name) {
@@ -883,7 +890,7 @@
       let body;
       try { body = JSON.parse(res.responseText); } catch { throw error('TorBox: resposta inválida.'); }
       if (body?.success !== true || !Array.isArray(body.data)) {
-        const auth = /AUTH|INVALID_API_KEY|UNAUTHORIZED/i.test(String(body?.error || ''));
+        const auth = /AUTH|INVALID_API_KEY|UNAUTHORIZED|BAD_TOKEN|PLAN_RESTRICTED_FEATURE|UPGRADE_REQUIRED/i.test(String(body?.error || ''));
         throw error('TorBox: a API não confirmou uma lista válida.', auth);
       }
       let added = 0;
@@ -1019,14 +1026,18 @@
   function saveCurrent(current, lastRefresh, merge = false) {
     const saved = stateNow();
     const ready = { ...saved.ready };
+    let changed = lastRefresh !== undefined && lastRefresh !== saved.lastRefresh;
     for (const kind of Object.keys(current)) {
       // merge: só acrescenta (refresh manual com listagem possivelmente antiga).
-      ready[kind] = merge ? [...new Set([...saved.ready[kind], ...current[kind]])].sort() : current[kind];
+      const nextIds = merge ? [...new Set([...saved.ready[kind], ...current[kind]])].sort() : current[kind];
+      if (!changed && (nextIds.length !== saved.ready[kind].length ||
+          nextIds.some((id, i) => id !== saved.ready[kind][i]))) changed = true;
+      ready[kind] = nextIds;
     }
+    if (!changed) return;
     const next = { version: 2, ready, lastRefresh: lastRefresh ?? saved.lastRefresh };
-    const serialized = JSON.stringify(next);
-    if (serialized.length > STATE_LIMIT) throw error('Biblioteca excede o limite de estado.');
-    if (serialized !== JSON.stringify(saved)) GM_setValue(STATE, next);
+    if (JSON.stringify(next).length > STATE_LIMIT) throw error('Biblioteca excede o limite de estado.');
+    GM_setValue(STATE, next);
   }
   function foreignLock() {
     const held = read(LOCK, null);
@@ -1250,7 +1261,10 @@
   async function reconcile(ctx, key, rev) {
     checkActive(key, rev);
     updatePending(ctx.current, ctx.fileCounts);
-    if (JSON.stringify(ctx.current).length > STATE_LIMIT) throw error('Biblioteca excede o limite de estado.');
+    let est = 0;
+    for (const ids of Object.values(ctx.current)) est += ids.length * 68;
+    if (est > STATE_LIMIT - 2048 && JSON.stringify(ctx.current).length > STATE_LIMIT)
+      throw error('Biblioteca excede o limite de estado.');
     if (hasNew(ctx.current, stateNow())) {
       const outcome = await performRefresh(key, rev, ctx.current, false);
       if (outcome === 'waiting') { ctx.delay = 2000; return; }
@@ -1354,7 +1368,7 @@
   const DV_TOKEN = '\\b(dv|dovi|dolby.?vision)\\b';
   const HDR10P_TOKEN = '\\bhdr10(?:\\+|(?:[-._]?plus|p)\\b)';
   // Grupos oficiais do TRaSH Guides (docs/json/{radarr,sonarr}/cf/web-tier-0x e remux-tier-0x,
-  // conferidos em 19/11/2026). O Sonarr não define Remux Tier 3.
+  // conferidos em 25/11/2026). O Sonarr não define Remux Tier 3.
   const TRASH = {
     web: {
       label: 'WEB-DL', token: '\\bweb.?dl\\b',
@@ -1396,7 +1410,7 @@
   };
   const NATIVE_CHIP_BASE = 'cursor-pointer rounded border px-2 py-0.5 text-xs whitespace-nowrap transition-colors';
   const FILTER_ROUTE = /^\/(movie|show|anime)\//;
-  const MORE_RESULTS_TARGET = 3500;
+  const MORE_RESULTS_TARGET = 3000;
   const MORE_RESULTS_COOLDOWN = 2100;
   const TOAST_FOUND_RE = /^(?:(\d+)\s+unique torrents found\b|No torrents found$)/i;
   const seenToasts = new WeakSet();
@@ -1668,8 +1682,9 @@
     return bars.length ? bars[bars.length - 1] : null;
   }
   function findShowMoreButton() {
-    for (const btn of document.querySelectorAll('button')) {
-      if (btn.textContent?.trim() === 'Show More Results') return btn;
+    const btns = document.getElementsByTagName('button');
+    for (let i = btns.length - 1; i >= 0; i--) {
+      if (btns[i].textContent?.trim() === 'Show More Results') return btns[i];
     }
     return null;
   }
@@ -1829,9 +1844,10 @@
     }
     if (mode === 'torrents' && queryInput()) {
       // Sincroniza o #query recém-montado com o sharedFilterState mantido entre as abas.
-      const qState = stateFromTerms(queryTerms());
+      const terms = queryTerms();
+      const qState = stateFromTerms(terms);
       if (qState.fmt !== sharedFilterState.fmt || qState.tier !== sharedFilterState.tier || qState.hdr !== sharedFilterState.hdr) {
-        const rest = queryTerms().filter(term => !OUR_TOKENS.has(term));
+        const rest = terms.filter(term => !OUR_TOKENS.has(term));
         setQueryValue([...rest, ...termsFromState(sharedFilterState)].join(' '));
       }
     }
