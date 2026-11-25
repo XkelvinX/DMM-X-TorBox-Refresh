@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DMM X TorBox Auto Refresh
 // @namespace    kelvin.torbox.webdav
-// @version      0.86
+// @version      0.87
 // @homepageURL  https://github.com/XkelvinX/DMM-X-TorBox-Refresh
 // @updateURL    https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/XkelvinX/DMM-X-TorBox-Refresh/main/DMMTorBox-Refresh.user.js
@@ -35,6 +35,10 @@
  * Primeira configuração: um refresh para sincronizar os arquivos já prontos.
  * Depois: novos arquivos disponíveis, inclusive os concluídos fora desta aba.
  * O refresh do servidor não força a varredura da biblioteca do Infuse.
+ *
+ * 0.87:
+ *   - Define Tier 1 como padrão nos filtros iniciais (WEB-DL: T1 + Dolby Vision + TB ✓) e
+ *     move Tiers 1–2 no menu para depois de Tier 3 (Tier 1, Tier 2, Tier 3, Tiers 1–2, Tiers 1–3).
  *
  * 0.86:
  *   - Corrige o contêiner de notificações do DMM para [data-rht-toaster] (react-hot-toast 2.6.1
@@ -137,7 +141,7 @@
   'use strict';
   if (window.top !== window.self) return;
   // Fonte única: @version do cabeçalho. O literal só é usado se GM_info não existir.
-  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.86';
+  const SCRIPT_VERSION = (typeof GM_info === 'object' && GM_info?.script?.version) || '0.87';
   const SCRIPT_TITLE = 'DMM X TorBox Auto Refresh';
   const API = 'https://api.torbox.app/v1/api';
   const DAV = 'https://webdav.torbox.app/refresh';
@@ -1344,7 +1348,7 @@
   // espaço e aplica AND entre os termos, então nenhum termo pode ter espaço nem começar com
   // "-" (exclusão). Na aba Usenet não há #query: as linhas <tr> são ocultadas pelo título.
   const FILTER_FORMATS = ['web', 'remux'];
-  const TIER_ORDER = ['12', '1', '2', '3', '123'];
+  const TIER_ORDER = ['1', '2', '3', '12', '123'];
   const TIER_LABEL = { 12: 'Tiers 1–2', 1: 'Tier 1', 2: 'Tier 2', 3: 'Tier 3', 123: 'Tiers 1–3' };
   const TIER_SHORT = { 12: 'T1–2', 1: 'T1', 2: 'T2', 3: 'T3', 123: 'T1–3' };
   const DV_TOKEN = '\\b(dv|dovi|dolby.?vision)\\b';
@@ -1418,7 +1422,7 @@
   let toastObserver = null;
   let filtersInitialized = false;
   // Estado compartilhado dos filtros de qualidade entre as abas Torrents e Usenet.
-  let sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
+  let sharedFilterState = { fmt: 'web', tier: '1', hdr: 'dv' };
   let activeMediaKey = '';
   let sharedTb = true;
   let tbSyncedInput = null;
@@ -1819,7 +1823,7 @@
     const currentMedia = mediaKey();
     if (currentMedia && currentMedia !== activeMediaKey) {
       activeMediaKey = currentMedia;
-      sharedFilterState = { fmt: 'web', tier: '12', hdr: 'dv' };
+      sharedFilterState = { fmt: 'web', tier: '1', hdr: 'dv' };
       sharedTb = true;
       tbSyncedInput = null;
     }
